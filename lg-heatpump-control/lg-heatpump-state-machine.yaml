@@ -11,6 +11,7 @@ lambda: !lambda |-
     //WAIT: Compressor has stopped during run with still heating request (so algoritm failed)
     //SWW: HP operating to create hot water
     //DEFROST: HP operating defrost cycle
+    //PDS: Post Defrost Stabilize Immediate after defrost start with a slowe target setting, incresing slowly to prevent overshoot
     //AFTERRUN: Run done (no more heating request) external pump runs
     
     static uint_fast32_t dt = 30; //round(id(state_machine).get_update_interval()/1000); //update interval in seconds
@@ -23,7 +24,7 @@ lambda: !lambda |-
     if(fsm.state() != INIT){
       //Receive all inputs
       fsm.receive_inputs();
-      fsm.process_inputs();
+      fsm.process_inputs();      
     }
 
     
@@ -44,7 +45,7 @@ lambda: !lambda |-
           //publish initial derivative and error_integral value
           id(derivative_value).publish_state(0);
           id(wp_stooklijn_error_integral).publish_state(0);
-          id(wp_target_error_integral).publish_state(0);
+          id(wp_target_error_integral).publish_state(0);                                              
           fsm.entry_done = true;
         }
         //enforce config
@@ -53,12 +54,11 @@ lambda: !lambda |-
         //wait for timeout
         if(fsm.get_run_time() < 90 || isnan(id(buiten_temp).state) || isnan(id(water_temp_aanvoer).state) || isnan(id(water_temp_retour).state)) break;
         //set initial filtered_oat value
-        id(filtered_oat).publish_state(id(buiten_temp).state);
+        id(filtered_oat).publish_state(id(buiten_temp).state);                     
         //after timeout
         fsm.receive_inputs();
-        fsm.proces_selects();
         //check for fast_start
-        //the 3 places where thermostat event does not lead to a switch off. Therefore not handled through check_change_events
+        //the 3 places where thermostat event does not lead to a switch off. Therefore not handled through check_change_events       
         if(fsm.input[THERMOSTAT]->state) {
           fsm.state_transition(START);
           id(controller_info).publish_state("Init complete. First state: START");
@@ -93,8 +93,8 @@ lambda: !lambda |-
           //switch pump off after 2 minutes
           fsm.external_pump(false);
           ESP_LOGD(fsm.state_name(), "External Pump off");
-          id(controller_info).publish_state("External Pump Off after stick protection");
-        }
+          id(controller_info).publish_state("External Pump Off");
+        }        
         //check events
         fsm.start_events();
         fsm.add_event(SWW_RUN);
@@ -117,30 +117,20 @@ lambda: !lambda |-
         if(!fsm.entry_done){
           fsm.entry_done = true;
           fsm.external_pump(true); //external pump on
+          fsm.heat(true); //heat on (to start heatpump)
           fsm.backup_heat(false);
-          id(controller_info).publish_state("External pump on. 3 min pre-run.");
-          //set initial target, to prevent compressor starting on too hot system
-          int new_target = fsm.input[STOOKLIJN_TARGET]->value - 1;
-          if(fsm.input[COMPRESSOR]->state){
-            //we don't want to kill it in case of instant start
-            fsm.set_safe_new_target(new_target);
-          } else {
-            //set this unsafe, because we don't want to startup when system temp is still to high
-            fsm.set_unsafe_new_target(new_target);
-          }
-          ESP_LOGD(fsm.state_name(), "Run start initial target set; stooklijn_target: %f pendel_target: %f tracking_value: %f ",fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value,fsm.input[TRACKING_VALUE]->value);
         }
         //enforce config
         fsm.backup_heat(false);
-
-        fsm.start_events();
-        fsm.add_event(BACKUP_ONLY_SWITCH);
-        if(fsm.check_change_events()) break;
         
         //three minutes delay to allow pump to run and values to stabilise 
         if(fsm.seconds_since_state_start() < (3*60)) break;
+        //set target, but not below stooklijn minimum water temp - 2
+        int new_target = fsm.input[STOOKLIJN_TARGET]->value + fsm.get_target_offset();
+        if(new_target < id(stooklijn_min_wtemp).state - 2) new_target = id(stooklijn_min_wtemp).state - 2;
+        fsm.set_new_target(new_target);
+        ESP_LOGD(fsm.state_name(), "Run start initial target set; stooklijn_target: %f pendel_target: %f tracking_value: %f ",fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value,fsm.input[TRACKING_VALUE]->value);
         fsm.set_run_start_time();
-        id(controller_info).publish_state("Starting heatpump, waiting for compressor");
         fsm.state_transition(STARTING);
         break;
       }
@@ -153,7 +143,6 @@ lambda: !lambda |-
         //SPECIAL: none
         if(!fsm.entry_done){
           fsm.entry_done = true;
-          fsm.heat(true); //heat on (to start heatpump)
         }
         //enforce allowed config
         fsm.backup_heat(false);
@@ -164,26 +153,18 @@ lambda: !lambda |-
         fsm.add_event(DEFROST_RUN);
         fsm.add_event(THERMOSTAT);
         fsm.add_event(RELAY_HEAT);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
         if(fsm.check_change_events()) break;
-
+                
         if(fsm.input[COMPRESSOR]->state){
           //we have ignition
-          //update target to realistic target
-          int new_target = fsm.get_realistic_start_target();
-          if(new_target != fsm.input[TEMP_NEW_TARGET]->value){
-            fsm.set_safe_new_target(new_target); //safe, we don't want to kill it again
-          }
-          id(controller_info).publish_state("Compressor is on; Waiting for modulation");
           fsm.state_transition(STABILIZE);
-          break;
         }
-        //while compressor is not on, keep checking of target updates (in case offset changes)
-        int new_target = fsm.input[STOOKLIJN_TARGET]->value - 1;
-        if(new_target != fsm.input[TEMP_NEW_TARGET]->value){
-            //set this unsafe, because we don't want to startup when system temp is still to high
-            fsm.set_unsafe_new_target(new_target);
-        }
+        //update target if stooklijn or stooklijn offset changes, but only increase
+        int new_target = fsm.input[STOOKLIJN_TARGET]->value + fsm.get_target_offset();
+        if(new_target > fsm.input[TEMP_NEW_TARGET]->value){
+          new_target = fsm.input[STOOKLIJN_TARGET]->value;
+          fsm.set_new_target(new_target);
+        }        
         break;
       }
       case STABILIZE: {
@@ -205,26 +186,28 @@ lambda: !lambda |-
         fsm.add_event(THERMOSTAT);
         fsm.add_event(RELAY_HEAT);
         fsm.add_event(COMPRESSOR);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
         if(fsm.check_change_events()) break;
 
         //check how far we are in the run
-        if((fsm.get_run_time() - fsm.get_run_start_time()) > (15*60) && fsm.compressor_modulation()){
+        if( (fsm.get_run_time() - fsm.get_run_start_time()) > (15*60) || ((fsm.get_run_time() - fsm.get_run_start_time()) > (6*60) && fsm.compressor_modulation())){
           //monitor situation
-          //we are stable if derivative => -3 and <= 3 (1 degree in 20 minutes)
-           if( (fsm.derivative_D_10 * 60) >= -3 && (fsm.derivative_D_10 * 60) <= 3){
+          //we are stable if derivative => -3 and <= 3 (1 degree in 20 minutes) or if compressor starts modulation (after 6 minutes)
+           if(fsm.compressor_modulation() || ((fsm.derivative_D_10 * 60) >= -3 && (fsm.derivative_D_10 * 60) <= 3)){
             //hand over to run algoritm, run will decide on overshoot/undershoot depending on where we stabilized
             ESP_LOGD(fsm.state_name(),"Stabilized, RUN is next");
-            id(controller_info).publish_state("Normal system operation");
             fsm.state_transition(RUN);
             break;
           }
         }
         //else still early run
-        //update target only if will be killed
-        if(fsm.pendel_delta > (fsm.hysteresis-0.3)){
-          int new_target = fsm.input[TEMP_NEW_TARGET]->value + 1;
-          fsm.set_safe_new_target(new_target);
+        //update target if tracking_value or stooklijn_target changed. No advanced modulation as this is useless during early run
+        //limit number of updates to once every 5 minutes, unless run will be killed
+        
+        if(fsm.pendel_delta >= fsm.hysteresis || (fsm.input[TEMP_NEW_TARGET]->seconds_since_change() > (5*60) && fsm.delta > 0 ) ){
+          int new_target = fsm.input[STOOKLIJN_TARGET]->value+fsm.get_target_offset();
+          if((fsm.input[TRACKING_VALUE]->value-new_target) >= fsm.hysteresis) new_target = (fsm.input[TRACKING_VALUE]->value-fsm.hysteresis) + 1;
+          if(new_target > fsm.input[STOOKLIJN_TARGET]->value+fsm.max_overshoot) new_target = fsm.input[STOOKLIJN_TARGET]->value+fsm.max_overshoot;
+          fsm.set_new_target(new_target);
         }
         break;
       }
@@ -238,6 +221,7 @@ lambda: !lambda |-
         if(!fsm.entry_done){
           fsm.entry_done = true;
         }
+        fsm.defrost_boost();
         //enforce allowed config and check events
         fsm.start_events();
         fsm.add_event(SWW_RUN);
@@ -247,16 +231,14 @@ lambda: !lambda |-
         fsm.add_event(COMPRESSOR);
         fsm.add_event(EMERGENCY);
         fsm.add_event(BACKUP_HEAT);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
         if(fsm.check_change_events()) break;
         
         //check low TEMP (for backup_heat_always_on)
         if(fsm.check_low_temp_trigger() && fsm.input[BACKUP_HEAT]->seconds_since_change() > (15*60)) {
           fsm.backup_heat(true,true);
-        } else if(!fsm.get_backup_heat_temp_limit_trigger()){
-          //backup heat is not on due to low temp, no reason for it to be on
-          fsm.backup_heat(false);
         }
+
+        fsm.degree_minutes_control();
 
         //check if we are running on the actual target
         if(fsm.input[TEMP_NEW_TARGET]->value != fsm.input[STOOKLIJN_TARGET]->value){
@@ -288,7 +270,7 @@ lambda: !lambda |-
           ESP_LOGD(fsm.state_name(),"New state will be stall. target: %f stooklijn_target: %f delta: %f pred_20_delta_5: %f pred_20_delta_10: %f",fsm.input[TEMP_NEW_TARGET]->value,fsm.input[STOOKLIJN_TARGET]->value,fsm.delta,fsm.pred_20_delta_5,fsm.pred_20_delta_10);
           fsm.state_transition(STALL);
           break;
-        } //else status quo
+        } //else status quo       
         break;
       }
       case OVERSHOOT: {
@@ -299,9 +281,9 @@ lambda: !lambda |-
         //ENFORCE CONFIG: BACKUP_HEAT OFF
         //SPECIAL: none
         if(!fsm.entry_done){
-          id(controller_info).publish_state("Managing overshoot");
           fsm.entry_done = true;
         }
+        fsm.defrost_boost();
         //enforce allowed config and check events
         fsm.backup_heat(false);
         fsm.start_events();
@@ -310,7 +292,6 @@ lambda: !lambda |-
         fsm.add_event(THERMOSTAT);
         fsm.add_event(RELAY_HEAT);
         fsm.add_event(COMPRESSOR);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
         if(fsm.check_change_events()) break;
 
         if(fsm.delta < 1 && fsm.pred_20_delta_5 < 1.5 && fsm.pred_20_delta_10 < 1.5 ){
@@ -318,29 +299,26 @@ lambda: !lambda |-
           if(fsm.input[TEMP_NEW_TARGET]->value <= fsm.input[STOOKLIJN_TARGET]->value){
             //overshoot contained operating below or at target
             //hand back to RUN at target
-            fsm.set_safe_new_target(fsm.input[STOOKLIJN_TARGET]->value);
+            fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value);
             ESP_LOGD(fsm.state_name(), "stooklijn_target <= pendel_target, delta < 2, no overshoot predicted, my job is done.");
             fsm.state_transition(RUN);
-            id(controller_info).publish_state("Overshoot contained; Normal system operation");
             break;
           }
         }
-        if(fsm.pendel_delta > (fsm.hysteresis-0.3)){
+        if(fsm.pendel_delta >= fsm.hysteresis){
           //emergency situation, run is about to be killed. Raise Target to prevent
           int new_target = fsm.input[TEMP_NEW_TARGET]->value + 1;
-          fsm.set_safe_new_target(new_target);
-          ESP_LOGD(fsm.state_name(), "Emergency intervention, raised pendel_target (%f) (if there was room). Tracking_value: %f. Pendel_delta: %f",fsm.input[TEMP_NEW_TARGET]->value,fsm.input[TRACKING_VALUE]->value,fsm.pendel_delta);
-          id(controller_info).publish_state("Overshoot: Emergency Intervention");
+          if(new_target > fsm.input[STOOKLIJN_TARGET]->value + fsm.max_overshoot) new_target = fsm.input[STOOKLIJN_TARGET]->value + fsm.max_overshoot;
+          fsm.set_new_target(new_target);
+          ESP_LOGD(fsm.state_name(), "Emergency intervention, raised pendel_target (%f) (if there was room)",fsm.input[TEMP_NEW_TARGET]->value);
           break;
         }
         if(fsm.input[TEMP_NEW_TARGET]->value > fsm.input[STOOKLIJN_TARGET]->value){
           //target overshoot logic to return to target
           //check if target can be lowered without killing the run
-          if(fsm.pendel_delta < (fsm.hysteresis-2)){
-            //lower target, but not below fsm.input[STOOKLIJN_TARGET]->value
-            int new_target = fsm.input[TEMP_NEW_TARGET]->value - 1;
-            if(new_target < fsm.input[STOOKLIJN_TARGET]->value) new_target = fsm.input[STOOKLIJN_TARGET]->value;
-            fsm.set_safe_new_target(new_target);
+          if(fsm.pendel_delta <= fsm.hysteresis-1){
+            //lower target, but not below fsm.input[STOOKLIJN_TARGET]->value next step may do that if needed (there is no next step anymore...)
+            fsm.set_new_target(max(fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value - 1));
             ESP_LOGD(fsm.state_name(), "Operating above stooklijn_target pendel_target (%f) could be lowered",fsm.input[TEMP_NEW_TARGET]->value);
             break;
           }
@@ -353,13 +331,13 @@ lambda: !lambda |-
         //DESCRIPTION: Logic to raise target to return back to stooklijn_target (and hopefully prevent overshoot)
         //INTERPRETS INPUTS: DELTA; PREDICTIONS
         //RECEIVES EVENTS: SWW_RUN; DEFROST; THERMOSTAT OFF; RELAY_HEAT OFF; COMPRESSOR OFF; EMERGENCY
-        //STATE TRANSITIONS: RUN; WAIT; SWW; DEFROST; AFTERRUN; BACKUP_ONLY
+        //STATE TRANSITIONS: RUN; WAIT; SWW; DEFROST; AFTERRUN
         //ENFORCE CONFIG: NONE
         //SPECIAL: none
         if(!fsm.entry_done){
           fsm.entry_done = true;
-          id(controller_info).publish_state("Stall detected; Recovering");
         }
+        fsm.defrost_boost();
         //enforce allowed config
         fsm.start_events();
         fsm.add_event(SWW_RUN);
@@ -369,29 +347,28 @@ lambda: !lambda |-
         fsm.add_event(COMPRESSOR);
         fsm.add_event(EMERGENCY);
         fsm.add_event(BACKUP_HEAT);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
         if(fsm.check_change_events()) break;
         
         //check low temp (for backup_heat_always_on)
         if(fsm.check_low_temp_trigger() && fsm.input[BACKUP_HEAT]->seconds_since_change() > (15*60)) {
           fsm.backup_heat(true,true);
         }
-
+        fsm.degree_minutes_control();
         //1: check if recovered
         if(fsm.input[TEMP_NEW_TARGET]->value >= fsm.input[STOOKLIJN_TARGET]->value && fsm.delta >= 0 && fsm.pred_20_delta_5 >= 0 && fsm.pred_20_delta_10 >= 0){
           //target is no longer below stooklijn_target. No longer a stall
-          //return to target and call run
-          fsm.set_safe_new_target(fsm.input[STOOKLIJN_TARGET]->value);
+          //return to target and call run 
+          fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value);
           ESP_LOGD(fsm.state_name(), "delta > 0, stooklijn_target >= pendel_target, my job is done.");
+          fsm.degree_minutes_status = false;
           fsm.state_transition(RUN);
-          id(controller_info).publish_state("Stall recovered; Normal system operation");
           break;
         }
         
         //2: check if below stooklijn target, with delta > 0 and modulating
         // (usually target change (boost) or after start). No minimum waiting time
         if(fsm.input[TEMP_NEW_TARGET]->value < fsm.input[STOOKLIJN_TARGET]->value && fsm.delta > 0 && fsm.compressor_modulation()){
-          fsm.set_safe_new_target(fsm.input[STOOKLIJN_TARGET]->value); 
+          fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value); 
           break;
         }
         
@@ -407,20 +384,20 @@ lambda: !lambda |-
           if((fsm.delta + (fsm.derivative_D_5*30)) < 0){
             //it will not be fixed next 30 minutes, take a big step
             //current target + 3 or tracking value, whichever is higher
-            fsm.set_safe_new_target(max(ceil(fsm.input[TRACKING_VALUE]->value),fsm.input[TEMP_NEW_TARGET]->value + 3)); 
+            fsm.set_new_target(max(fsm.input[TRACKING_VALUE]->value,fsm.input[TEMP_NEW_TARGET]->value + 2)); 
           } else {
             //current target + 1 or tracking value, whichever is higher
-            fsm.set_safe_new_target(max(ceil(fsm.input[TRACKING_VALUE]->value),fsm.input[TEMP_NEW_TARGET]->value  + 1));
+            fsm.set_new_target(max(fsm.input[TRACKING_VALUE]->value,fsm.input[TEMP_NEW_TARGET]->value  + 1));
           }
           //but not above stooklijn_target (yet)
-          fsm.set_safe_new_target(min(fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value));
+          fsm.set_new_target(min(fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value));
           ESP_LOGD(fsm.state_name(), "Operating below target, raising target, pendel_target: %f",fsm.input[TEMP_NEW_TARGET]->value);
           break;
         }
         //4: We are operating at target, are we modulating?
-        if(fsm.compressor_modulation() && fsm.input[TEMP_NEW_TARGET]->value < fsm.input[STOOKLIJN_TARGET]->value+3 && id(change_target_stall).state){
+        if(fsm.compressor_modulation() && fsm.input[TEMP_NEW_TARGET]->value < fsm.input[STOOKLIJN_TARGET]->value+3 && (id(change_target_stall).state || fsm.degree_minutes_status)){
           //raise target above stooklijn target to stop modulation
-          fsm.set_safe_new_target(min(fsm.input[STOOKLIJN_TARGET]->value+3,ceil(fsm.input[TRACKING_VALUE]->value) + 3));
+          fsm.set_new_target(min(fsm.input[STOOKLIJN_TARGET]->value+3,fsm.input[TRACKING_VALUE]->value + 2));
           ESP_LOGD(fsm.state_name(), "Modulating, raising target, pendel_target: %f",fsm.input[TEMP_NEW_TARGET]->value);
           break;
         }
@@ -447,42 +424,31 @@ lambda: !lambda |-
         //DESCRIPTION: Failed run? The compressor has stopped, but the thermostat is still requesting heat...
         //INTERPRETS INPUTS: NONE
         //RECEIVES EVENTS: SWW_RUN; DEFROST; THERMOSTAT OFF; RELAY_HEAT OFF; COMPRESSOR ON 
-        //STATE TRANSITIONS: RUN; SWW; DEFROST; AFTERRUN; BACKUP_ONLY
-        //ENFORCE CONFIG: BACKUP_HEAT OFF
+        //STATE TRANSITIONS: RUN; SWW; DEFROST; AFTERRUN
+        //ENFORCE CONFIG: NONE
         //SPECIAL: none
         if(!fsm.entry_done){
-          id(controller_info).publish_state("Compressor stopped -> Wait");
-          int new_target = fsm.input[STOOKLIJN_TARGET]->value - 1;
-          if(new_target != fsm.input[TEMP_NEW_TARGET]->value){
-            //set this unsafe, because we don't want to startup when system temp is still to high
-            fsm.set_unsafe_new_target(new_target);
-            ESP_LOGD(fsm.state_name(),"Wait started. target changed: Setting new target: %f",fsm.input[TEMP_NEW_TARGET]->value);
-          }
           fsm.entry_done = true;
         }
+        fsm.defrost_boost();
         //enforce allowed config
-        fsm.backup_heat(false); //backup heat off, otherwise compressor never restarts
         fsm.start_events();
         fsm.add_event(SWW_RUN);
         fsm.add_event(DEFROST_RUN);
         fsm.add_event(THERMOSTAT);
         fsm.add_event(RELAY_HEAT);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
+        fsm.add_event(BACKUP_HEAT);
         if(fsm.check_change_events()) break;
         
-        //compressor started, so system temp is within range set realistic startup target
-        if(fsm.input[COMPRESSOR]->state){
-          int new_target = fsm.get_realistic_start_target();
-          if(new_target != fsm.input[TEMP_NEW_TARGET]->value){
-            fsm.set_safe_new_target(new_target);
-            ESP_LOGD(fsm.state_name(),"Compressor on. target changed: Setting new target: %f",fsm.input[TEMP_NEW_TARGET]->value);
-          }
+        //check if stooklijn value changed
+        if(fsm.input[STOOKLIJN_TARGET]->has_flag()) {
+          fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value);
+          ESP_LOGD(fsm.state_name(),"Target changed: Setting new target: %f",fsm.input[TEMP_NEW_TARGET]->value);
         }
         //wait at least 6 minutes before switching to run, even if compressor is running
         if(fsm.seconds_since_state_start() < (6*60)) break;
         if(fsm.input[COMPRESSOR]->state){
           fsm.state_transition(RUN);
-          id(controller_info).publish_state("Compressor on again; Wait is over");
           break;
         }
         break;
@@ -524,10 +490,11 @@ lambda: !lambda |-
             else fsm.state_transition(WAIT);
             //start boost if we were running without backup heat
             if(!fsm.input[BACKUP_HEAT]->state){
+                                                                                              
               id(controller_info).publish_state("SWW done starting boost.");
               fsm.boost(true);
             }
-            fsm.set_safe_new_target(fsm.input[STOOKLIJN_TARGET]->value);
+            fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value);
             break;
           }
         } 
@@ -537,7 +504,7 @@ lambda: !lambda |-
         //DESCRIPTION: DEFROST RUN. Monitor and decide on next state
         //INTERPRETS INPUTS: NONE
         //RECEIVES EVENTS: NONE;
-        //STATE TRANSITIONS: RUN; WAIT; SWW; AFTERRUN
+        //STATE TRANSITIONS: PDS //RUN; WAIT; SWW; AFTERRUN
         //ENFORCE CONFIG: NONE
         //SPECIAL: none
         if(!fsm.entry_done){
@@ -551,44 +518,93 @@ lambda: !lambda |-
         fsm.add_event(THERMOSTAT);
         fsm.add_event(RELAY_HEAT);
         fsm.add_event(BACKUP_HEAT);
+        fsm.defrost_boost();
         if(fsm.check_change_events()) break;
-
-        if(!fsm.input[DEFROST_RUN]->state){
-          //defrosting stopped initially start with stooklijn_target as target
-          fsm.boost(true);
+        
+        /*if(!fsm.input[DEFROST_RUN]->state){
+          //defrosting stopped. Prepare for the post defrost run
           if(id(silent_after_defrost).state) fsm.set_silent_after_defrost();
-          if(fsm.input[TEMP_NEW_TARGET]->value != fsm.input[STOOKLIJN_TARGET]->value) fsm.set_safe_new_target(fsm.input[STOOKLIJN_TARGET]->value);
-          //10 minute delay (defrost takes 4 minutes) some additional delay to allow values to stabilize and backup heater to run
-          if(fsm.seconds_since_state_start() < (10*60)) break;
-          if(!fsm.input[THERMOSTAT_SENSOR]->state){
-            //straight off if no thermostat signal after SWW (ignore delay)
-            fsm.state_transition(AFTERRUN);
-            break;
+          if(id(defrost_stabilize).state) { 
+            fsm.defrost_offset = -4;                   
+            fsm.state_transition(PDS);
           }
-          if(fsm.input[COMPRESSOR]->state){
-            if(fsm.delta > 0){
-              fsm.backup_heat(false);
-              fsm.state_transition(RUN);
-            } else {
-              fsm.state_transition(STALL);
-            }
-          } else {
-            fsm.backup_heat(false);
-            fsm.boost(false);
-            fsm.state_transition(WAIT);
-          }
+        } */ 
+        if(id(defrost_stabilize).state) { 
+          //defrosting stopped. Prepare for the post defrost run
+          //the defrost offset is set to -4 to prevent overshoot after defrost
+          //silent after defrost is set to prevent overshoot after defrost
+          id(silent_after_defrost).turn_on();
+          fsm.defrost_offset = -4;
+          fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value + fsm.defrost_offset);
+        }  
+        if(id(silent_after_defrost).state) fsm.set_silent_after_defrost();
+        if(!fsm.input[DEFROST_RUN]->state){
+          //defrosting stopped. Prepare for the post defrost run
+            fsm.state_transition(PDS);
+            fsm.last_defrost_end_time();
         }
+        break;
+      }
+      case PDS: {
+        //DESCRIPTION: PDS; Post Defrost Stabilize determine oand control stabilization after Defrost
+        //INTERPRETS INPUTS: NONE
+        //RECEIVES EVENTS: NONE;
+        //STATE TRANSITIONS: RUN; WAIT; STALL; AFTERRUN
+        //ENFORCE CONFIG: NONE
+        //SPECIAL: none
+        if(!fsm.entry_done){
+          fsm.entry_done = true;
+        }
+        //enforce allowed config
+        fsm.start_events();
+        fsm.add_event(THERMOSTAT);
+        fsm.add_event(RELAY_HEAT);
+        fsm.add_event(BACKUP_HEAT);
+        if(fsm.check_change_events()) break;        
+                    
+          //defrosting stopped initially start with stooklijn_target as target
+        if(fsm.input[TEMP_NEW_TARGET]->value != (fsm.input[STOOKLIJN_TARGET]->value + fsm.defrost_offset)) (fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value + fsm.defrost_offset));
+         if(id(defrost_stabilize).state) {
+           if(fsm.seconds_since_state_start() > (16*60)) fsm.defrost_offset = 0; 
+             else if(fsm.seconds_since_state_start() > (15*60)) fsm.defrost_offset = -1; 
+               else if(fsm.seconds_since_state_start() > (13*60)) fsm.defrost_offset = -2; 
+                 else if(fsm.seconds_since_state_start() > (5*60)) fsm.defrost_offset = -3;
+          }
+          else {
+            fsm.defrost_offset = 0;
+            if(fsm.input[TEMP_NEW_TARGET]->value != fsm.input[STOOKLIJN_TARGET]->value) fsm.set_new_target(fsm.input[STOOKLIJN_TARGET]->value);
+            //10 minute delay (defrost takes 4 minutes) some additional delay to allow values to stabilize and backup heater to run
+            if(fsm.seconds_since_state_start() < (10*60)) break;
+          }
+        if(!fsm.input[THERMOSTAT_SENSOR]->state){
+          //straight off if no thermostat signal after SWW (ignore delay)
+          fsm.state_transition(AFTERRUN);
+          break;
+        }
+        if (fsm.defrost_offset == 0) {
+          if(fsm.input[COMPRESSOR]->state){
+           if(fsm.delta > 0){
+             fsm.backup_heat(false);
+             fsm.state_transition(RUN);
+           } else {
+               fsm.state_transition(STALL);
+             }
+          } else {
+               fsm.backup_heat(false);
+               fsm.boost(false);
+               fsm.state_transition(WAIT);
+           }
+        }   
         break;
       }
       case AFTERRUN: {
         //DESCRIPTION: Shutdown and let pump run for x minutes
         //INTERPRETS INPUTS: NONE
         //RECEIVES EVENTS: THERMOSTAT; SWW_RUN
-        //STATE TRANSITIONS: IDLE; SWW;
+        //STATE TRANSITIONS: IDLE; sww
         //ENFORCE CONFIG: BACKUP_HEAT OFF; RELAY_HEAT OFF; BOOST_OFF
         //SPECIAL: none
         if(!fsm.entry_done){
-          id(controller_info).publish_state("External Pump Running");
           fsm.entry_done = true;
         }
         //check events and enforce config
@@ -598,47 +614,24 @@ lambda: !lambda |-
         fsm.start_events();
         fsm.add_event(SWW_RUN);
         if(fsm.check_change_events()) break;
-        //the 3 places where thermostat event does not lead to a switch off. Therefore not handled through check_change_events
+        //the 3 places where thermostat event does not lead to a switch off. Therefore not handled through check_change_events       
         if(fsm.input[THERMOSTAT]->state) {
           fsm.state_transition(START);
           ESP_LOGD(fsm.state_name(), "THERMOSTAT ON next state: START");
-          id(controller_info).publish_state("From Afterrun to start");
         }
         //Timeout
         if(fsm.seconds_since_state_start() < (id(external_pump_runover).state*60)) break;
-        id(controller_info).publish_state("Afterrun complete");
         fsm.state_transition(IDLE);
-        break;
-      }
-      case BACKUP_ONLY:{
-        //DESCRIPTION: Backup heat on, Heatpump OFF
-        //INTERPRETS INPUTS: NONE
-        //RECEIVES EVENTS: THERMOSTAT; BACKUP_ONLY SWITCH
-        //STATE TRANSITIONS: AFTERRUN;
-        //ENFORCE CONFIG: BACKUP_HEAT ON; RELAY_HEAT OFF; BOOST OFF
-        //SPECIAL: none
-        //we enter this mode either automatically (low temp) or when the switch backup_heat_only is activated
-        //leave this mode also automatically (temp improved) or when the switch is switched off
-        //check events and enforce config
-        fsm.external_pump(true);
-        fsm.backup_heat(true);
-        fsm.heat(false);
-        fsm.boost(false);
-        fsm.start_events();
-        fsm.add_event(THERMOSTAT);
-        fsm.add_event(BACKUP_ONLY_SWITCH);
-        if(fsm.check_change_events()) break;
         break;
       }
       case NONE:{
         ESP_LOGE(fsm.state_name(), "ERROR: State is none");
         id(controller_info).publish_state("ERROR: state = NONE");
-        break;
       }
     }
 
     if(fsm.get_run_time() % fsm.alive_timer == 0){
-      ESP_LOGD(fsm.state_name(), "**alive** timer: %d oat: %f inlet: %f outlet: %f tracking_value: %f stooklijn: %f target: %f delta: %f pendel_delta: %f ",fsm.get_run_time(),fsm.input[OAT]->value,id(water_temp_retour).state,id(water_temp_aanvoer).state,fsm.input[TRACKING_VALUE]->value,fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value,fsm.delta,fsm.pendel_delta);
+      ESP_LOGD(fsm.state_name(), "**alive** timer: %d oat: %f inlet: %f outlet: %f tracking_value: %f stooklijn: %f pendel: %f delta: %f pendel_delta: %f ",fsm.get_run_time(),fsm.input[OAT]->value,id(water_temp_retour).state,id(water_temp_aanvoer).state,fsm.input[TRACKING_VALUE]->value,fsm.input[STOOKLIJN_TARGET]->value,fsm.input[TEMP_NEW_TARGET]->value,fsm.delta,fsm.pendel_delta);
     }
     
     //***************************************************************
@@ -646,13 +639,9 @@ lambda: !lambda |-
     //***************************************************************
     //Update modbus target if temp_new_target has changed    
     if(fsm.input[TEMP_NEW_TARGET]->has_flag() && fsm.input[TEMP_NEW_TARGET]->value != (float)id(doel_temp).state && fsm.state() != INIT){
-      //prevent update while still in INIT and when target setting disabled
-      if(id(disable_switch).state){
-        id(controller_info).publish_state("Target change inhibited by disable_switch");
-      } else {
-        //Update target through modbus
-        fsm.set_target_temp(fsm.input[TEMP_NEW_TARGET]->value);
-      }
+      //prevent update while still in INIT
+      //Update target through modbus
+      fsm.set_target_temp(fsm.input[TEMP_NEW_TARGET]->value);
     }
 
     //Now unflag all input values to be able to track changes on next run

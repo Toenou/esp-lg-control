@@ -17,15 +17,8 @@ packages:
   with_external_relays: !include lg-heatpump-control/sensors/lg-with-external-relays.yaml #use external thermostat connected to GPIO pin 
   #without_external_relays: !include lg-heatpump-control/sensors/lg-without-external-relays.yaml #Replace external thermostat by an on/off switch
   #*****
-
-  #Again enable correct version to include HA Feelslike sensor
-  #*****
-  with_ha_feelslike: !include lg-heatpump-control/sensors/lg-with-ha-feelslike-sensor.yaml
-  #without_ha_feelslike: !include lg-heatpump-control/sensors/lg-without-ha-feelslike-sensor.yaml
-  #*****
-
 esphome:
-  name: "${device_name}"
+  name: esp32-heatpump-controller
   includes:
     - lg-heatpump-control/lg-heatpump-state-machine.h
   on_boot:
@@ -41,9 +34,7 @@ esphome:
             id(relay_pump).turn_off();
             id(relay_heat).turn_off();
           }
-          id(controller_state).publish_state("Init");
-          id(controller_info).publish_state("Initializing");
-
+          id(controller_state).publish_state("Initialiseren");
 # Enable logging. Disable modbus controller debug messages
 logger:
   logs:
@@ -53,12 +44,18 @@ logger:
     esp32.preferences: WARN
     sensor: WARN
     text_sensor: WARN
-    dallas.temp.sensor: WARN #disable if dallas is not used
+    dallas.sensor: WARN #disable if dallas is not used
     number: WARN
 
+globals:
+  - id: last_update_time
+    type: unsigned long
+    restore_value: no
+    initial_value: "0"
+             
 number:
   - platform: template
-    name: "Stooklijn offset"
+    name: "HP Heating Curve Offset"
     id: wp_stooklijn_offset
     min_value: -10
     max_value: 10
@@ -74,7 +71,7 @@ number:
             fsm.update_stooklijn();
   - platform: template
     id: stooklijn_curve
-    name: "Stooklijn Curve"
+    name: "HP Heating Curve Curve"
     min_value: -6
     max_value: 6
     step: 0.5
@@ -88,12 +85,12 @@ number:
             fsm.update_stooklijn();
   - platform: template
     id: stooklijn_min_oat
-    name: "Stooklijn Minimum Outside-temp"
+    name: "HP Heating Curve Minimum Outdoor Temperature"
     min_value: -25
     max_value: 0
     step: 1
     restore_value: yes
-    initial_value: -5
+    initial_value: -15
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:download-circle-outline
@@ -103,12 +100,12 @@ number:
             fsm.update_stooklijn();
   - platform: template
     id: stooklijn_max_wtemp
-    name: "Stooklijn Maximum Water-temp"
+    name: "HP Heating Curve Maximum Watertemperature"
     min_value: 20
     max_value: 60
     step: 1
     restore_value: yes
-    initial_value: 44
+    initial_value: 35
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:waves-arrow-right
@@ -118,12 +115,12 @@ number:
             fsm.update_stooklijn();
   - platform: template
     id: stooklijn_min_wtemp
-    name: "Stooklijn Minimum Water-temp"
+    name: "HP Heating Curve Minimum Watertemperature"
     min_value: 20
     max_value: 40
     step: 1
     restore_value: yes
-    initial_value: 24
+    initial_value: 25
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:waves-arrow-left
@@ -133,12 +130,12 @@ number:
             fsm.update_stooklijn();
   - platform: template
     id: stooklijn_max_oat
-    name: "Stooklijn Start Outside-temp"
+    name: "HP Heating Curve Start Outdoor Temperature"
     min_value: 0
     max_value: 20
     step: 1
     restore_value: yes
-    initial_value: 20
+    initial_value: 16
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:waves-arrow-left
@@ -148,7 +145,7 @@ number:
             fsm.update_stooklijn();
   - platform: template
     id: minimum_run_time
-    name: "Minimale run tijd"
+    name: "HP Minimum Runtime"
     min_value: 0
     max_value: 60
     step: 1
@@ -159,62 +156,117 @@ number:
     icon: mdi:timer-sync-outline
   - platform: template
     id: external_pump_runover
-    name: "External pump overrun"
+    name: "HP External pump overrun"
     min_value: 0
     max_value: 60
     step: 1
     restore_value: yes
-    initial_value: 20
+    initial_value: 10
     unit_of_measurement: "min"
     optimistic: true
     icon: mdi:timer-cog-outline
   - platform: template
     id: oat_silent_always_off
-    name: "Outside-temp silent always off"
+    name: "HP Outdoor Temperature Silent Always Off"
     min_value: -20
     max_value: 10
     step: 1
     restore_value: yes
-    initial_value: 2
+    initial_value: 4
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:volume-plus
   - platform: template
     id: oat_silent_always_on
-    name: "Outside-temp silent always on"
+    name: "HP Outdoor Temperature Silent Always On"
     min_value: -20
     max_value: 20
     step: 1
     restore_value: yes
-    initial_value: 6
+    initial_value: 8
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:volume-off
   - platform: template
-    id: thermostat_off_delay
-    name: "Thermostat off delay"
+    id: auto_s_t_out_high
+    name: "Auto S T_out pos limit"
     min_value: 0
     max_value: 10
+    step: 0.5
+    restore_value: yes
+    initial_value: 5
+    unit_of_measurement: "°C"
+    optimistic: true
+    icon: mdi:thermometer-high
+  - platform: template
+    id: auto_s_t_out_low
+    name: "Auto S T_out neg limit"
+    min_value: -10
+    max_value: 0
+    step: 0.5
+    restore_value: yes
+    initial_value: -8
+    unit_of_measurement: "°C"
+    optimistic: true
+    icon: mdi:thermometer-low
+  - platform: template
+    id: auto_s_t_evap
+    name: "Auto S T_evap"
+    min_value: -12
+    max_value: 0
+    step: 0.5
+    restore_value: yes
+    initial_value: -7
+    unit_of_measurement: "°C"
+    optimistic: true
+    icon: mdi:thermometer
+  - platform: template
+    id: auto_s_rh
+    name: "Auto S RH"
+    min_value: 50
+    max_value: 90
+    step: 5
+    restore_value: yes
+    initial_value: 70
+    unit_of_measurement: "%"
+    optimistic: true
+    icon: mdi:cloud-percent
+  - platform: template
+    id: dew_margin
+    name: "dewpoint margin for auto S"
+    min_value: 0
+    max_value: 10
+    step: 0.5
+    restore_value: yes
+    initial_value: 3
+    unit_of_measurement: "°C"	
+    optimistic: true
+    icon: mdi:thermometer
+  - platform: template
+    id: thermostat_off_delay
+    name: "HP Thermostat Off Delay"
+    min_value: 0
+    max_value: 20
     step: 1
     restore_value: yes
-    initial_value: 1
+    initial_value: 12
     unit_of_measurement: "min"
     optimistic: true
     icon: mdi:timer-off-outline
   - platform: template
     id: thermostat_on_delay
-    name: "Thermostat on delay"
+    name: "HP Thermostat On Delay"
     min_value: 0
-    max_value: 10
+    max_value: 20
     step: 1
     restore_value: yes
-    initial_value: 0
+    initial_value: 12
     unit_of_measurement: "min"
     optimistic: true
     icon: mdi:timer
   - platform: template
     id: boost_time
-    name: "Boost duration"
+    name: "HP Boost duration"
     min_value: 0
     max_value: 180
     step: 1
@@ -225,7 +277,7 @@ number:
     icon: mdi:timer-plus-outline
   - platform: template
     id: backup_heater_active_temp
-    name: "Outside-temp backup heater active"
+    name: "Buitentemperatuur backup heater active"
     min_value: -30
     max_value: 20
     step: 1
@@ -235,15 +287,46 @@ number:
     icon: mdi:gas-burner
   - platform: template
     id: backup_heater_always_on_temp
-    name: "Outside-temp backup heater always on"
+    name: "Buitentemperatuur backup heater always on"
     min_value: -30
     max_value: 20
     step: 1
     restore_value: yes
-    initial_value: -6
+    initial_value: -28
     optimistic: true
-    icon: mdi:gas-burner
-
+    icon: mdi:gas-burner                      
+  - platform: template
+    id: stooklijn_windchill_factor
+    name: "Percentage of windchill on stooklijn"
+    min_value: 0
+    max_value: 50
+    step: 1
+    restore_value: yes
+    initial_value: 10
+    unit_of_measurement: "%"
+    optimistic: true
+    icon: mdi:snowflake-thermometer
+  - platform: template
+    id: degree_minutes
+    name: "Degree minutes control"
+    min_value: -1500
+    max_value: -100
+    step: 10
+    restore_value: yes
+    initial_value: -300
+    unit_of_measurement: "Kmin"
+    optimistic: true
+    icon: mdi:thermostat 
+  - platform: template
+    id: defrost_boost_set
+    name: "Defrost Boost Offset"
+    min_value: 0
+    max_value: 5
+    step: 1
+    restore_value: yes
+    unit_of_measurement: "°C"
+    optimistic: true
+    icon: mdi:thermometer-plus 
 select:
   - platform: template
     name: "Automatic Boost"
@@ -277,81 +360,138 @@ select:
       then:
         lambda: !lambda |-
             fsm.proces_selects();
-  - platform: template
-    name: "Backup Heat: Disable HP"
-    id: backup_heat_only_mode
-    options:
-      - "Do not disable HP"
-      - "Disable HP during Low Temp when Backup Heat runs"
-      - "Disable HP now and run Backup Heat"
-    restore_value: true
-    optimistic: true
-    on_value:
-      then:
-        lambda: !lambda |-
-            fsm.proces_selects();
+
 switch:
   - platform: template
     name: "Enable Silent After Defrost"
     id: silent_after_defrost
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON                                  
+    optimistic: true
+    icon: mdi:snowflake-melt
+
+  - platform: template
+    name: "Automatic Silent"
+    id: auto_silent
+    restore_mode: RESTORE_DEFAULT_ON
     optimistic: true
     icon: mdi:snowflake-melt
   - platform: template
     name: "Change Target during Stall"
     id: change_target_stall
-    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    icon: mdi:target-variant
+  - platform: template
+    name: "Degree Minutes Control"
+    id: degree_minutes_sw
+    restore_mode: RESTORE_DEFAULT_ON
     optimistic: true
     icon: mdi:target-variant
   - platform: restart
     name: "ESP WP Control Restart"
+    
   - platform: template
-    name: "Temperature Boost"
+    name: "HP Temperature Boost"
     id: boost_switch
     optimistic: true
     icon: mdi:thermometer-plus
-#if this switch is enabled target changes are not sent to HP
+    
   - platform: template
-    name: "Disable Target Setting"
-    id: disable_switch
-    restore_mode: RESTORE_DEFAULT_OFF
+    name: "Stabilize after defrost"
+    id: defrost_stabilize
+    restore_mode: RESTORE_DEFAULT_ON
     optimistic: true
-    icon: mdi:power
-
+    icon: mdi:snowflake-melt
+    
 interval:
   - interval: 30s
     id: state_machine
     then: !include { file: lg-heatpump-control/lg-heatpump-state-machine.yaml }
-
+   
 sensor:
+  - platform: template   
+    name: "HP CV Ta"
+    id: CVTa
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      return (float)(id(CVTaanvoer).state);
+    update_interval: 30s
+    icon: mdi:radiator         
+  - platform: template   
+    name: "HP CV Tr"
+    id: CVTr
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      return (float)(id(CVTretour).state);       
+    update_interval: 30s
+    icon: mdi:radiator-disabled     
   - platform: template
-    name: "Stooklijn Watertemp Target"
+    name: "HP Heating Curve Watertemp Target"
     id: watertemp_target
     device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
+    state_class: "measurement"                       
     update_interval: never
     icon: mdi:home-thermometer-outline
-  - platform: template
-    name: "Stooklijn Calculation Temperature"
-    id: stooklijn_calc
-    device_class: "temperature"
-    unit_of_measurement: "°C"
-    state_class: "measurement"
-    update_interval: never
-    icon: mdi:thermometer
   - platform: wifi_signal
-    name: "${device_name} WiFi Signal"
+    name: "HP WiFi Signal"
     update_interval: 120s
     accuracy_decimals: 0
   - platform: uptime
-    name: "${device_name} Uptime"
+    name: "HP Uptime"
     unit_of_measurement: d
     device_class: "duration"
     update_interval: 3600s
     accuracy_decimals: 1
     filters:
       - multiply: 0.000011574
+  - platform: template                 
+    name: "HP CV Delta T"
+    id: hp_cv_delta_t
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      //The +0.6 and -0.2 is a correction factor due to innacurate readings. Adapt this to your situation
+      //I do not correct it at the sensor, as the pump uses the uncorrected value for target setting, modulation etc
+      //Messing with this value at the sensor will mess up te script
+      return (float)(id(CVTa).state-id(CVTr).state); 
+    update_interval: 30s
+    icon: mdi:delta     
+  - platform: template                 
+    name: "HP Delta T"
+    id: wp_delta_t
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    lambda: |-
+      //The +0.6 and -0.2 is a correction factor due to innacurate readings. Adapt this to your situation
+      //I do not correct it at the sensor, as the pump uses the uncorrected value for target setting, modulation etc
+      //Messing with this value at the sensor will mess up te script
+      return (float)(id(water_temp_aanvoer).state-id(water_temp_retour).state); 
+    update_interval: 30s
+    icon: mdi:delta 
+# Heat pump performance calculatons
+  - platform: template
+    name: "HP Thermal Power"
+    id: thermal_power
+    device_class: power
+    unit_of_measurement: W
+    accuracy_decimals: 2
+    lambda: |-
+        return ((id(current_flow_rate).state/60) * id(wp_delta_t).state * 4.186 * 1000);
+  - platform: template
+    name: "HP COP"
+    id: cop_guess
+    state_class: measurement
+    lambda: |-
+      if(id(current_flow_rate).state < 6 || id(wp_delta_t).state <= 0) return 0;
+      if(!id(compressor_running).state || id(total_power).state < 300) return 0;
+      if(id(wp_delta_t).state < 0) return 0;
+      return (id(thermal_power).state / id(total_power).state);
+    accuracy_decimals: 2
+    unit_of_measurement: "COP"
+    update_interval: 60 sec
+    icon: mdi:approximately-equal   
   - platform: template
     name: "Derivative"
     id: derivative_value
@@ -365,7 +505,7 @@ sensor:
     accuracy_decimals: 1
     unit_of_measurement: "degree minutes" 
     update_interval: never  
-    icon: mdi:sigma
+    icon: mdi:sigma 
   - platform: template
     name: "Target Error degree minutes"
     id: wp_target_error_integral
@@ -373,10 +513,44 @@ sensor:
     unit_of_measurement: "degree minutes" 
     update_interval: never  
     icon: mdi:sigma
+  - platform: homeassistant
+    id: ha_windchill_temp
+    entity_id: sensor.feel_temperature
+    on_value:
+      then:
+        - lambda: |-
+            // Record the current time in milliseconds when the sensor is updated
+            id(last_update_time) = millis();
+  - platform: template
+    name: "Validated Windchill Temperature"
+    id: validated_ha_windchill_temp
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 60s
+    lambda: |-
+      // Get the current value of the Home Assistant sensor
+      float raw_temp = id(ha_windchill_temp).state;
+
+      // Check that the data is valid: not NaN and updated within the last hour
+      bool valid_data = !isnan(raw_temp) && (millis() - id(last_update_time)) < (60 * 60 * 6000) && id(buiten_temp).state < 15;
+
+      if (valid_data) {
+        return raw_temp;
+      } else {
+        ESP_LOGW("Validated HA Windchill Temperature", "Sensor data is invalid or outdated.");
+        return NAN;  // Return NaN to indicate invalid data
+      }
+    icon: mdi:thermometer
+  - platform: homeassistant
+    id: ha_rh
+    entity_id: sensor.feel_humidityoutdoor_humidity
+  - platform: homeassistant
+    id: ha_dewpoint
+    entity_id: sensor.outdoor_dew_point  
 # Sensors for ESP version and WIFI information
 text_sensor:
   - platform: version
-    name: "${device_name} ESPHome Version"
+    name: "HP ESPHome Version"
   - platform: wifi_info
     ip_address:
       name: "${device_name} ip"
@@ -384,13 +558,14 @@ text_sensor:
     ssid:
       name: "${device_name} ssid"
       icon: mdi:wifi-marker
+    
   - platform: template
-    name: "Controller state"
+    name: "HP Controller State"
     id: controller_state
     update_interval: never
     icon: mdi:state-machine
   - platform: template
-    name: "Controller info"
+    name: "HP Controller Info"
     id: controller_info
     update_interval: never
     icon: mdi:memory

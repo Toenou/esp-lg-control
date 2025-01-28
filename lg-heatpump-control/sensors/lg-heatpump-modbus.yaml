@@ -1,14 +1,14 @@
 modbus:
   id: modbus_lg
   uart_id: uart_modbus
-  flow_control_pin: GPIO5
+  flow_control_pin: GPIO05
   send_wait_time: 200ms
   
 uart:
-  tx_pin: GPIO17
+  id: uart_modbus
+  tx_pin: GPIO17 
   rx_pin: GPIO16
   baud_rate: 9600
-  id: uart_modbus
   parity: none
   data_bits: 8
   stop_bits: 1
@@ -19,17 +19,31 @@ modbus_controller:
     modbus_id: modbus_lg
     update_interval: 30s
     setup_priority: -10
+    
+  - id: eastron
+    address: 0x02
+    modbus_id: modbus_lg
+    setup_priority: -10
+    update_interval: 60s       
 
 switch:
   - platform: modbus_controller
-    name: "SWW On/Off"
+    modbus_controller_id: lg
+    id: heat_pump_power
+    name: "HP Enable/Disable"
+    register_type: coil
+    address: 0
+    icon: mdi:power
+  - platform: modbus_controller
+    internal: true
+    name: "HP DHW On/Off"
     modbus_controller_id: lg
     id: sww_on_off
     register_type: coil
     address: 1
     icon: mdi:shower-head
   - platform: modbus_controller
-    name: "Silent Mode"
+    name: "HP Silent Mode"
     modbus_controller_id: lg
     id: silent_mode_switch
     register_type: coil
@@ -39,170 +53,148 @@ switch:
 binary_sensor:
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Pump Running"
+    name: "HP Water flow"
+    id: water_flow_status
+    register_type: discrete_input
+    address: 0
+    
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP Pump Running"
     id: pump_running
     register_type: discrete_input
+    skip_updates: 1
     address: 1
     icon: mdi:pump
-#not needed for the controller, but added to optimise modbus communication
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "External Pump Running"
-    id: external_pump_running
-    register_type: discrete_input
-    address: 2
-    icon: mdi:pump
-  - platform: modbus_controller
-    modbus_controller_id: lg
-    name: "Compressor Running"
+    name: "HP Compressor Running"
     id: compressor_running
     register_type: discrete_input
+    skip_updates: 1
     address: 3
     icon: mdi:car-turbocharger
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Defrosting"
+    name: "HP Defrosting"
     id: defrosting
     register_type: discrete_input
+    skip_updates: 1
     address: 4
     icon: mdi:snowflake-melt
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "SWW Heating"
+    name: "HP DHW Heating"
+    internal: true
     id: sww_heating
     register_type: discrete_input
+    skip_updates: 1
     address: 5
     icon: mdi:shower-head
-#not needed for the controller, but added to optimise modbus communication
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Boiler disinfection"
-    id: boiler_disinfection
-    register_type: discrete_input
-    address: 6
-    icon: mdi:pump
-  - platform: modbus_controller
-    modbus_controller_id: lg
-    name: "Silent Mode"
+    name: "HP Silent Mode"
     id: silent_mode_state
     register_type: discrete_input
+    skip_updates: 1
     address: 7
     icon: mdi:volume-off
 
 sensor:
+### LG HEAT PUMP ANALOG INPUT REGISTERS ###
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Error code"
+    name: "HP Error Code"
     id: error_code
     register_type: read
     address: 0
     value_type: U_WORD
-    icon: mdi:alert-octagon
+
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Bedrijfsmodus"
+    name: "HP ODU Status"
     id: bedrijfsmodus
     register_type: read
     address: 1
+    #skip_updates: 12
     value_type: U_WORD
     icon: mdi:information-outline
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Water retour"
+    name: "HP Water Inlet Temperature"
     id: water_temp_retour
     register_type: read
     address: 2
-    device_class: "temperature"
+    device_class: temperature
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
-    icon: mdi:thermometer-chevron-down
+    icon: mdi:thermometer-chevron-down 
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Water aanvoer"
+    name: "HP Water Outlet Temperature"
     id: water_temp_aanvoer
     register_type: read
     address: 3
-    register_count: 2
-    device_class: "temperature"
+    device_class: temperature
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
-    icon: mdi:thermometer-chevron-up
+    icon: mdi:thermometer-chevron-up 
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "SWW Temperatuur"
+    name: "DHW Temperature"
+    internal: true
     id: sww_temp
     register_type: read
     address: 5
-    register_count: 2
-    device_class: "temperature"
+    device_class: temperature
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: U_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
-    icon: mdi:thermometer-water
-  - platform: template
-    name: "Rounded SWW Temperature"
-    id: rounded_sww_temp
-    device_class: "temperature"
-    unit_of_measurement: "°C"
-    state_class: "measurement"
-    accuracy_decimals: 1
-    lambda: |-
-      return (float)(floor((id(sww_temp).state*2)+0.5)/2);
-    update_interval: 30s
-    icon: mdi:thermometer-water
+    icon: mdi:thermometer-water  
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Garagetemperatuur"
+    name: "HP Woonkamer Temperature"
     id: binnen_temp
     register_type: read
     address: 7
-    device_class: "temperature"
+    device_class: temperature
     unit_of_measurement: "°C"
-    state_class: "measurement"
-    value_type: S_WORD
-    accuracy_decimals: 1
-    filters:
-      - multiply: 0.1
-    icon: mdi:garage-open-variant
-  - platform: modbus_controller
-    modbus_controller_id: lg
-    name: "Flow Rate"
-    id: current_flow_rate
-    register_type: read
-    address: 8
-    register_count: 4
-    device_class: "water"
-    state_class: "measurement"
-    unit_of_measurement: "L/m"
     value_type: U_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
-    lambda: |-
-      if(x > 5) return x;
-      else return 0.0;
-    icon: mdi:waves-arrow-right
+    icon: mdi:sofa-outline  
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Buitentemperatuur"
+    name: "HP Flow Rate"
+    id: current_flow_rate
+    register_type: read
+    address: 8
+    unit_of_measurement: "l/min"
+    value_type: U_WORD
+    accuracy_decimals: 1
+    lambda: |-
+      if(id(pump_running).state) return x;
+      else return 0.0; 
+    filters:
+      - multiply: 0.1
+    icon: mdi:waves-arrow-right                      
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP Outdoor Temperature"
     id: buiten_temp
     register_type: read
     address: 12
-#    register_count: 4
-    device_class: "temperature"
+    device_class: temperature
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     icon: mdi:weather-cloudy
@@ -214,13 +206,17 @@ sensor:
   - platform: template
     name: "Filtered OAT"
     id: filtered_oat
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     accuracy_decimals: 1
     lambda: |-
       static float prev_oat = -100.0;
-      float new_oat = floor(id(buiten_temp).state);
+      float new_oat;
+      if (isnan(id(validated_ha_windchill_temp).state)) {
+        new_oat = floor(id(buiten_temp).state);
+      } else {
+        new_oat = ((100 - id(stooklijn_windchill_factor).state) * floor(id(buiten_temp).state) / 100)
+                    + (id(stooklijn_windchill_factor).state * floor(id(validated_ha_windchill_temp).state) / 100);
+      }
       if(new_oat - prev_oat > 0.5) {
         fsm.update_stooklijn();
         prev_oat = new_oat;
@@ -234,190 +230,237 @@ sensor:
     icon: mdi:weather-cloudy
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Pipe in Temp"
+    name: "HP Pipe in Temp"
     id: temp16
     register_type: read
     address: 16
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
+      
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Pipe Out Temp"
+    name: "HP Pipe Out Temp"
     id: temp17
     register_type: read
     address: 17
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
+    
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Suction Temp"
+    name: "HP Suction Temp"
     id: temp18
     register_type: read
     address: 18
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
+      
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Compressor Temp"
+    name: "HP Compressor Temp"
     id: compressor_temp
     register_type: read
     address: 19
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
+    accuracy_decimals: 1
     filters:
       - multiply: 0.1
-    accuracy_decimals: 1
+      
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Condensor Temp"
-    id: condensor_temp
+    name: "HP Evaporator Temperature"
+    id: evaporator_temp
     register_type: read
     address: 20
-#    register_count: 2
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: S_WORD
     accuracy_decimals: 1
     filters:
       - multiply: 0.1
-    icon: mdi:hvac
+    icon: mdi:hvac  
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "High Press"
+    name: "HP High Press"
     id: high_press
     register_type: read
     address: 22
     value_type: U_WORD
-    accuracy_decimals: 0
-    device_class: "pressure"
-    state_class: "measurement"
-    unit_of_measurement: "mbar"
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    unit_of_measurement: "bar"
     icon: mdi:meter-electric-outline
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Low Press"
+    name: "HP Low Press"
     id: low_press
     register_type: read
     address: 23
     value_type: U_WORD
-    accuracy_decimals: 0
-    device_class: "pressure"
-    state_class: "measurement"
-    unit_of_measurement: "mbar"
+    accuracy_decimals: 2
+    filters:
+      - multiply: 0.01
+    unit_of_measurement: "bar"
+  - platform: template
+    name: "HP Evaporation Temp"
+    id: t_evap
+    unit_of_measurement: "°C"
+    accuracy_decimals: 2
+    lambda: |-
+      float x;
+      x = pow((id(low_press).state * 100), 0.3066) * 11.87 - 88.81;
+      return x;
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Compressor Hz"
+    name: "HP Compressor Hz"
     id: compressor_rpm
     register_type: read
     address: 24
-    device_class: "frequency"
-    state_class: "measurement"
     unit_of_measurement: "Hz"
     value_type: U_WORD
     accuracy_decimals: 0
     icon: mdi:car-turbocharger
+
+### LG HEAT PUMP ANALOG OUTPUT HOLDING REGISTERS ### 
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "Doeltemperatuur"
+    name: "HP Target Temperature"
     id: doel_temp
     register_type: holding
     address: 2
-    register_count: 6
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: U_WORD
     accuracy_decimals: 1
+    skip_updates: 3
     filters:
       - multiply: 0.1
-    icon: mdi:home-thermometer-outline
+    icon: mdi:home-thermometer-outline  
   - platform: modbus_controller
     modbus_controller_id: lg
-    name: "SWW Doeltemperatuur"
+    internal: true
+    name: "HP DHW Target Temperature"
     id: sww_target
     register_type: holding
     address: 8
-    device_class: "temperature"
     unit_of_measurement: "°C"
-    state_class: "measurement"
     value_type: U_WORD
     accuracy_decimals: 1
+    skip_updates: 3
     filters:
       - multiply: 0.1
-    icon: mdi:thermometer-water
-  - platform: template
-    name: "Delta T"
-    id: wp_delta_t
-    device_class: "temperature"
-    state_class: "measurement"
-    unit_of_measurement: "K"
+    icon: mdi:thermometer-water  
+### EASTRON kWh METER ANALOG INPUT REGISTERS ###
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Voltage L1"
+    register_type: read
+    address: 0x00
+    value_type: FP32
+    device_class: voltage
+    unit_of_measurement: V
     accuracy_decimals: 1
-    lambda: |-
-      return (float)(id(corrected_water_temp_aanvoer).state-id(corrected_water_temp_retour).state); 
-    update_interval: 30s
-    icon: mdi:delta
-  - platform: template
-    name: "Corrected retour"
-    id: corrected_water_temp_retour
-    device_class: "temperature"
-    unit_of_measurement: "°C"
-    state_class: "measurement"
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Voltage L2"
+    register_type: read
+    address: 0x02
+    value_type: FP32
+    device_class: voltage
+    unit_of_measurement: V
     accuracy_decimals: 1
-    lambda: |-
-      return (float)(id(water_temp_retour).state-0.4); 
-    update_interval: 30s
-    icon: mdi:thermometer-chevron-down
-  - platform: template
-    name: "Rounded Corrected retour"
-    id: rounded_corrected_water_temp_retour
-    device_class: "temperature"
-    unit_of_measurement: "°C"
-    state_class: "measurement"
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Voltage L3"
+    register_type: read
+    address: 0x04
+    value_type: FP32
+    device_class: voltage
+    unit_of_measurement: V
     accuracy_decimals: 1
-    lambda: |-
-      return (float)(floor((id(corrected_water_temp_retour).state*2)+0.5)/2);
-    update_interval: 30s
-    icon: mdi:thermometer-chevron-down
-  - platform: template
-    name: "Corrected aanvoer"
-    id: corrected_water_temp_aanvoer
-    device_class: "temperature"
-    unit_of_measurement: "°C"
-    state_class: "measurement"
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Power L1"
+    register_type: read
+    address: 0x0C
+    value_type: FP32
+    device_class: power
+    unit_of_measurement: W
     accuracy_decimals: 1
-    lambda: |-
-      return (float)(id(water_temp_aanvoer).state+0.5); 
-    update_interval: 30s
-    icon: mdi:thermometer-chevron-up
-  - platform: template
-    name: "Rounded Corrected aanvoer"
-    id: rounded_corrected_water_temp_aanvoer
-    device_class: "temperature"
-    unit_of_measurement: "°C"
-    state_class: "measurement"
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Power L2"
+    register_type: read
+    address: 0x0E
+    value_type: FP32
+    device_class: power
+    unit_of_measurement: W
     accuracy_decimals: 1
-    lambda: |-
-      return (float)(floor((id(corrected_water_temp_aanvoer).state*2)+0.5)/2);
-    update_interval: 30s
-    icon: mdi:thermometer-chevron-up
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Power L3"
+    register_type: read
+    address: 0x10
+    value_type: FP32
+    device_class: power
+    unit_of_measurement: W
+    accuracy_decimals: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Total Power"
+    id: total_power
+    register_type: read
+    address: 0x34
+    value_type: FP32
+    device_class: power
+    unit_of_measurement: W
+    accuracy_decimals: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Total Reactive Power"
+    register_type: read
+    address: 0x3C
+    value_type: FP32
+    device_class: reactive_power
+    unit_of_measurement: VAr
+    accuracy_decimals: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Grid Frequency"
+    register_type: read
+    address: 0x46
+    value_type: FP32
+    device_class: frequency
+    unit_of_measurement: Hz
+    accuracy_decimals: 2    
+
+  - platform: modbus_controller
+    modbus_controller_id: eastron
+    name: "HP SDM72 Total Energy"
+    register_type: read
+    address: 0x180
+    value_type: FP32
+    device_class: energy
+    state_class: total_increasing
+    unit_of_measurement: kWh
+    accuracy_decimals: 2      
 
 number:
   - platform: modbus_controller
@@ -428,3 +471,77 @@ number:
     value_type: U_WORD
     step: 0.1
     multiply: 10
+
+text_sensor:
+# Convert numbers from registers to text
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP Operation Mode"
+    id: oprating_mode_text
+    register_type: holding
+    address: 0
+    raw_encode: HEXBYTES
+    lambda: |-
+      uint16_t value = modbus_controller::word_from_hex_str(x, 0);
+      switch (value) {
+        case 0: return std::string("Cooling");
+        case 3: return std::string("Auto");
+        case 4: return std::string("Heating");
+        default: return std::string("Unknown");
+      }
+      return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP Control Method"
+    id: control_method_text
+    register_type: holding
+    address: 1
+    raw_encode: HEXBYTES
+    lambda: |-
+      uint16_t value = modbus_controller::word_from_hex_str(x, 0);
+      switch (value) {
+        case 0: return std::string("Water outlet temperature control");
+        case 1: return std::string("Water inlet temperature control");
+        case 2: return std::string("Room air control");
+        default: return std::string("Unknown");
+      }
+      return x;
+
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP ODU Status"
+    id: odu_status_text
+    register_type: read
+    address: 1
+    raw_encode: HEXBYTES
+    lambda: |-
+      uint16_t value = modbus_controller::word_from_hex_str(x, 0);
+      switch (value) {
+        case 0: return std::string("Standby (Off)");
+        case 1: return std::string("Cooling");
+        case 2: return std::string("Heating");
+        default: return std::string("Unknown");
+      }
+      return x;
+
+select:
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP Operation Mode"
+    address: 0
+    value_type: U_WORD
+    optionsmap:
+      "Cooling": 0
+      "Heating": 4
+      "Auto": 3
+
+  - platform: modbus_controller
+    modbus_controller_id: lg
+    name: "HP Control Method"
+    address: 1
+    value_type: U_WORD
+    optionsmap:
+      "Water outlet temperature control": 0
+      "Water inlet temperature control": 1
+      "Room air control": 2

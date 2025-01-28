@@ -1,5 +1,5 @@
-  enum states {NONE,INIT,IDLE,START,STARTING,STABILIZE,RUN,OVERSHOOT,STALL,WAIT,SWW,DEFROST,AFTERRUN,BACKUP_ONLY};
-  enum input_types {THERMOSTAT,THERMOSTAT_SENSOR,COMPRESSOR,SWW_RUN,DEFROST_RUN,OAT,STOOKLIJN_TARGET,TRACKING_VALUE,BOOST,BACKUP_HEAT,EXTERNAL_PUMP,RELAY_HEAT,TEMP_NEW_TARGET,WP_PUMP,SILENT_MODE,EMERGENCY,BACKUP_ONLY_SWITCH};
+  enum states {NONE,INIT,IDLE,START,STARTING,STABILIZE,RUN,OVERSHOOT,STALL,WAIT,SWW,DEFROST,PDS,AFTERRUN};
+  enum input_types {THERMOSTAT,THERMOSTAT_SENSOR,COMPRESSOR,SWW_RUN,DEFROST_RUN,OAT,OutsideT,STOOKLIJN_TARGET,TRACKING_VALUE,BOOST,BACKUP_HEAT,EXTERNAL_PUMP,RELAY_HEAT,TEMP_NEW_TARGET,WP_PUMP,SILENT_MODE,EMERGENCY};
   struct input_struct {
     bool state = false;
     bool prev_state = false;
@@ -24,11 +24,11 @@
         uint_fast32_t run_time_value = 0; //total esp boot time
         uint_fast32_t state_start_time = 0; //run_time_value on last state change
         uint_fast32_t run_start_time = 0; //run_time_value of start of heat run
+        uint_fast32_t breakout_start_time = 0; //run_time_value of start of breakout
         int current_boost_offset = 0 ;//keep track of offset during boost mode. Will be 0 if boost is not active
         std::vector<float> derivative; //vector of floats to integrate derivative (used in control logic)
-        float stooklijn_error_integral = 0; //to provide 'degree minutes' sensor data
-        float target_error_integral = 0; //to provide 'degree minutes' sensor data
-        const float feelslike_factor = 0.4; //the factor used when using feelslike factor for stooklijn calculations
+        float stooklijn_error_integral = 0; //to provide 'degree minutes' sensor data																					 
+        float target_error_integral = 0; //to provide 'degree minutes' sensor data		
         bool backup_heat_temp_limit_trigger = false; //if backup heat triggered due to low temperature (always on)?
         bool update_stooklijn_bool = true;
         //backup_heat_mode select
@@ -36,21 +36,25 @@
         bool backup_heat_sww = false;
         bool backup_heat_defrost = false;
         bool backup_heat_lowtemp = false;
-        bool backup_heat_only_enabled = false;
         //automatic_boost select
         bool boost_defrost = false;
         bool boost_sww = false;
         //silent after defrost
         bool silent_on_after_defrost = false;
+        bool breakout = false;
+        bool silent = true;
         uint_fast32_t silent_after_defrost_start_time;
       public:
         input_struct* input[17]; //list of all inputs
         bool entry_done = false;
+        bool degree_minutes_status = false;
         //default values, change these if you want
-        const int boost_offset = 2; //number of degrees to raise stooklijn in boost mode
-        const int hysteresis = 4; //Set controller control mode to 'outlet' and set hysteresis to the setting you have on the controller (recommend 4)
-        int max_overshoot = 5; //maximum allowable overshoot in 'OVERSHOOT' state
+        int boost_offset = 2; //number of degrees to raise stooklijn in boost mode
+        int hysteresis = 4; //Set controller control mode to 'outlet' and set hysteresis to the setting you have on the controller (recommend 4)
+        int max_overshoot = 3; //maximum allowable overshoot in 'OVERSHOOT' state
         int alive_timer = 120; //interval in seconds for an 'alive' message in the logs
+        int defrost_boost_offset = 0; //number of degrees to raise stooklijn when time between defrosts is too short to transfer enough heat into the house
+        int defrost_offset = 0; //Negative offset immediate after defrost to reduce power and Ta overshoot
         float delta = 0; //Current Error value negative below target, positive above target
         float pendel_delta = 0; //Error value in regard to pendel target
         float derivative_D_5 = 0; //derivative based on past 5 minutes
@@ -74,26 +78,28 @@
         uint_fast32_t get_run_start_time();
         uint_fast32_t get_state_start_time();
         uint_fast32_t seconds_since_state_start();
+        uint_fast32_t last_defrost_end_time();
+        uint_fast32_t seconds_since_last_defrost();
         void receive_inputs();
         void process_inputs();
         void unflag_input_values();
         float calculate_stooklijn();
         bool thermostat_state();
         void calculate_derivative(float tracking_value);
-        void calculate_integral(float tracking_value, float stooklijn_target, float wp_target);
+        void calculate_integral(float tracking_value, float stooklijn_target, float wp_target);		
         void heat(bool mode);
         void external_pump(bool mode);
         void backup_heat(bool mode,bool temp_limit_trigger = false);
-        bool get_backup_heat_temp_limit_trigger();
         void boost(bool mode);
+        void defrost_boost();
         void toggle_boost();
         void silent_mode(bool mode);
         void toggle_silent_mode();
+        void break_out();
+        void degree_minutes_control();
         void set_silent_after_defrost();
         int get_target_offset();
-        int get_realistic_start_target();
-        void set_safe_new_target(float new_target);
-        void set_unsafe_new_target(float new_target);
+        void set_new_target(float new_target);
         void start_events();
         void add_event(input_types ev);
         bool check_change_events();
@@ -131,6 +137,7 @@
     input[SWW_RUN] = new input_struct(&run_time_value);
     input[DEFROST_RUN] = new input_struct(&run_time_value);
     input[OAT] = new input_struct(&run_time_value);
+    input[OutsideT] = new input_struct(&run_time_value);
     input[STOOKLIJN_TARGET] = new input_struct(&run_time_value);
     input[TRACKING_VALUE] = new input_struct(&run_time_value);
     input[BOOST] = new input_struct(&run_time_value);
@@ -141,7 +148,6 @@
     input[WP_PUMP] = new input_struct(&run_time_value);
     input[SILENT_MODE] = new input_struct(&run_time_value);
     input[EMERGENCY] = new input_struct(&run_time_value);
-    input[BACKUP_ONLY_SWITCH] = new input_struct(&run_time_value);
   }
   state_machine_class::~ state_machine_class(){
     delete input[THERMOSTAT];
@@ -150,6 +156,7 @@
     delete input[SWW_RUN];
     delete input[DEFROST_RUN];
     delete input[OAT];
+    delete input[OutsideT];
     delete input[STOOKLIJN_TARGET];
     delete input[TRACKING_VALUE];
     delete input[BOOST];
@@ -160,7 +167,6 @@
     delete input[WP_PUMP];
     delete input[SILENT_MODE];
     delete input[EMERGENCY];
-    delete input[BACKUP_ONLY_SWITCH];
   }
   void state_machine_class::update_stooklijn(){
     update_stooklijn_bool = true;
@@ -190,12 +196,12 @@
   }
   const char * state_machine_class::state_friendly_name(states stt){
     if(stt == NONE) stt = current_state;
-    static const std::string state_string_friendly_list[14] = {"None","Initialiseren","Uit","Start","Opstarten","Aan (stabiliseren)","Aan (verwarmen)","Aan (overshoot)","Aan (stall)","Pauze (Uit)","Aan (Warm Water)","Ontdooien","Nadraaien","Alleen Backup Heat"}; 
+    static const std::string state_string_friendly_list[14] = {"None","Initialiseren","Uit","Start","Opstarten","Aan (stabiliseren)","Aan (verwarmen)","Aan (overshoot)","Aan (stall)","Pauze (Uit)","Aan (Warm Water)","Ontdooien","Stabiliseer na ontdooien","Nadraaien"}; 
     return state_string_friendly_list[stt].c_str();
   }
   const char * state_machine_class::state_name(states stt){
     if(stt == NONE) stt = current_state;
-    static const std::string state_string_list[14] = {"NONE","INIT","IDLE","START","STARTING","STABILIZE","RUN","OVERSHOOT","STALL","WAIT","SWW","DEFROST","AFTERRUN","BACKUP ONLY"};
+    static const std::string state_string_list[14] = {"NONE","INIT","IDLE","START","STARTING","STABILIZE","RUN","OVERSHOOT","STALL","WAIT","SWW","DEFROST","PDS","AFTERRUN"};
     return state_string_list[stt].c_str();
   }
   uint_fast32_t state_machine_class::get_run_time(){
@@ -216,6 +222,12 @@
   uint_fast32_t state_machine_class::seconds_since_state_start(){
     return get_run_time() - get_state_start_time();
   }
+  uint_fast32_t state_machine_class::last_defrost_end_time(){
+    return get_run_time();
+  }
+  uint_fast32_t state_machine_class::seconds_since_last_defrost(){
+    return get_run_time() - last_defrost_end_time();
+  }
   //receive all values, booleans (states) or floats (values)
   void state_machine_class::receive_inputs(){
     input[THERMOSTAT_SENSOR]->receive_state(id(thermostat_signal).state); //state of thermostat input
@@ -224,16 +236,17 @@
     input[SWW_RUN]->receive_state(id(sww_heating).state); //is the domestic hot water run active
     input[DEFROST_RUN]->receive_state(id(defrosting).state); //is defrost active
     input[OAT]->receive_value(round(id(filtered_oat).state)); //outside air temperature
+    input[OutsideT]->receive_value(floor(id(buiten_temp).state));
     if(input[OAT]->has_flag() || update_stooklijn_bool) input[STOOKLIJN_TARGET]->receive_value(calculate_stooklijn()); //stooklijn target
     //Set to value that anti-pendel script will track (outlet/inlet) (recommend inlet)
-    input[TRACKING_VALUE]->receive_value(id(water_temp_aanvoer).state);
+    input[TRACKING_VALUE]->receive_value(floor(id(water_temp_aanvoer).state));
     input[BOOST]->receive_state(id(boost_switch).state);
     input[BACKUP_HEAT]->receive_state(id(relay_backup_heat).state); //is backup heat on/off
     input[EXTERNAL_PUMP]->receive_state(id(relay_pump).state); //is external pump on/off
     input[RELAY_HEAT]->receive_state(id(relay_heat).state); //is realy_heat (heatpump external thermostat contact) on/off
     input[WP_PUMP]->receive_state(id(pump_running).state); //is internal pump running
     input[SILENT_MODE]->receive_state(id(silent_mode_state).state); //is silent mode on
-    if(input[TEMP_NEW_TARGET]->value == 0.0) set_safe_new_target(input[STOOKLIJN_TARGET]->value); // set temp new target in case of instant start
+    if(input[TEMP_NEW_TARGET]->value == 0.0) input[TEMP_NEW_TARGET]->value = input[STOOKLIJN_TARGET]->value; // set temp new target
     delta = input[TRACKING_VALUE]->value-input[STOOKLIJN_TARGET]->value; 
     pendel_delta = input[TRACKING_VALUE]->value-input[TEMP_NEW_TARGET]->value;
   }
@@ -245,7 +258,8 @@
       toggle_boost();
     }
     toggle_silent_mode();
-    if(input[WP_PUMP]->state && state() != SWW && state() != DEFROST && state() != BACKUP_ONLY){
+    break_out();
+    if(input[WP_PUMP]->state && state() != SWW && state() != DEFROST){
       //calculate derivative and publish new value
       calculate_derivative(input[TRACKING_VALUE]->value);
     } else if(!input[WP_PUMP]->state && derivative.size() > 0){
@@ -256,11 +270,13 @@
     if(input[COMPRESSOR]->state){
       //calculate error integral and publish new value
       calculate_integral(input[TRACKING_VALUE]->value,input[STOOKLIJN_TARGET]->value,input[TEMP_NEW_TARGET]->value);
-    } else if (stooklijn_error_integral != 0||target_error_integral != 0){
+
+    } else if (stooklijn_error_integral != 0 || target_error_integral != 0 || state() == IDLE){
       //clear error integral
       stooklijn_error_integral = 0;
       target_error_integral = 0;
-      id(wp_stooklijn_error_integral).publish_state(0);
+      degree_minutes_status = false;
+      id(wp_stooklijn_error_integral).publish_state(stooklijn_error_integral);
     }
   }
   //set input.value.prev_value = input_value.value to remove the implicit 'value changed' flag
@@ -271,6 +287,7 @@
     input[SWW_RUN]->unflag();
     input[DEFROST_RUN]->unflag();
     input[OAT]->unflag();
+    input[OutsideT]->unflag();
     input[STOOKLIJN_TARGET]->unflag();
     input[TRACKING_VALUE]->unflag();
     input[BOOST]->unflag();
@@ -281,7 +298,6 @@
     input[WP_PUMP]->unflag();
     input[SILENT_MODE]->unflag();
     input[EMERGENCY]->unflag();
-    input[BACKUP_ONLY_SWITCH]->unflag();
   }
   //***************************************************************
   //*******************Stooklijn***********************************
@@ -294,48 +310,38 @@
     //wait for a valid oat reading
     float oat = 20;
     if(input[OAT]->value > 60 || input[OAT]->value < -50 || isnan(input[OAT]->value)){
-      input[OAT]->value = prev_oat;
+      oat = prev_oat;
       //use prev_oat (or 20) and do not set update_stooklijn to false, to trigger a new run on next cycle
       ESP_LOGD("calculate_stooklijn", "Invalid OAT (%f) waiting for next run", input[OAT]->value);
     }  else {
       prev_oat = input[OAT]->value;
       update_stooklijn_bool = false;
     }
-    float oat_value = round(input[OAT]->value);
-    if(id(use_feelslike).state){
-      //use feelslike temp to offset stooklijn
-      if(!isnan(id(filtered_feelslike).state) && id(filtered_feelslike).state > -20 && id(filtered_feelslike).state < 25){
-        oat_value = floor((oat_value * (1-this->feelslike_factor)) + (id(filtered_feelslike).state * this->feelslike_factor));
-      } else {
-        //no valid feelslike received, update on next run
-        ESP_LOGD("calculate_stooklijn", "Invalid feelslike (%f) updating on next run", id(filtered_feelslike).state);
-        update_stooklijn_bool = true;
-      }
-    }
     float new_stooklijn_target;
     //OAT expects start temp to be OAT 20 with Watertemp 20. Steepness is defined bij Z, calculated by the max wTemp at minOat
     //Formula is wTemp = ((Z x (stooklijn_max_oat - OAT)) + stooklijn_min_wtemp) + C 
     //Formula to calculate Z = 0-((stooklijn_max_wtemp-stooklijn_min_wtemp)) / (stooklijn_min_oat - stooklijn_max_oat))
-    //C is the curvature of the stooklijn defined by C = (stooklijn_curve*0.01)*(oat)^2
-    //This will add a positive/negative offset with increasing/decreasing OAT. You can set this to zero if you don't need it and want a linear stooklijn
-    //I need it in my installation as the stooklijn is spot on at relative high temperatures, but too low at lower temps (or vice versa)
+    //C is the curvature of the stooklijn defined by C = (stooklijn_curve*0.001)*(oat-max_oat)^2
+    //This will add a positive offset with decreasing offset. You can set this to zero if you don't need it and want a linear stooklijn
+    //I need it in my installation as the stooklijn is spot on at relative high temperatures, but too low at lower temps
     const float Z =  0 - (float)( (id(stooklijn_max_wtemp).state-id(stooklijn_min_wtemp).state)/(id(stooklijn_min_oat).state - id(stooklijn_max_oat).state));
     //If oat above or below maximum/minimum oat, clamp to stooklijn_max/min value
+    float oat_value = round(input[OAT]->value);
     if(oat_value > id(stooklijn_max_oat).state) oat_value = id(stooklijn_max_oat).state;
     else if(oat_value < id(stooklijn_min_oat).state) oat_value = id(stooklijn_min_oat).state;
-    float C = (id(stooklijn_curve).state*0.01)*pow(oat_value,2);
+    float C = (id(stooklijn_curve).state*0.001)*pow((oat_value-id(stooklijn_max_oat).state),2);
     new_stooklijn_target = (int)round( (Z * (id(stooklijn_max_oat).state-oat_value)) + id(stooklijn_min_wtemp).state + C);
     //Add stooklijn offset
     new_stooklijn_target = new_stooklijn_target + id(wp_stooklijn_offset).state;
     //Add boost offset
     new_stooklijn_target = new_stooklijn_target + current_boost_offset;
+    //Add defrost boost offset
+    new_stooklijn_target = new_stooklijn_target + defrost_boost_offset;
     //Clamp target to minimum temp/max water+3
     clamp(new_stooklijn_target,id(stooklijn_min_wtemp).state,id(stooklijn_max_wtemp).state+3);
-    ESP_LOGD("calculate_stooklijn", "Stooklijn calculated with oat: %f, calc_base %f, Z: %f, C: %f offset: %f, result: %f",input[OAT]->value, oat_value, Z, C, id(wp_stooklijn_offset).state, new_stooklijn_target);
+    ESP_LOGD("calculate_stooklijn", "Stooklijn calculated with oat: %f, Z: %f, C: %f offset: %f, result: %f",input[OAT]->value, Z, C, id(wp_stooklijn_offset).state, new_stooklijn_target);
     //Publish new stooklijn value to watertemp value sensor
     id(watertemp_target).publish_state(new_stooklijn_target);
-    //Publish calculation base
-    id(stooklijn_calc).publish_state(oat_value);
     return new_stooklijn_target;
   }
   //***************************************************************
@@ -425,8 +431,8 @@
         id(relay_heat).turn_off();
         input[RELAY_HEAT]->receive_state(false);
       }
-      //external pump can remain on, backup heater must be off, unless BACKUP_ONLY
-      if(input[BACKUP_HEAT]->state && state() != BACKUP_ONLY){
+      //external pump can remain on, backup heater must be off
+      if(input[BACKUP_HEAT]->state){
         backup_heat(false);
         ESP_LOGD(state_name(),"Invalid configuration relay_heat off before relay_backup_heat off.");
         id(controller_info).publish_state("Invalid config: heat off before backup_heat");
@@ -463,24 +469,21 @@
   //***************************************************************
   //*******************Backup Heat*********************************
   //***************************************************************
-  bool state_machine_class::get_backup_heat_temp_limit_trigger(){
-    return backup_heat_temp_limit_trigger;
-  }
   void state_machine_class::backup_heat(bool mode,bool temp_limit_trigger){
     if(mode){
-      //relay heat must be on, OR BACKUP_ONLY_SWITCH otherwise it is an invalid request
-      if(!input[RELAY_HEAT]->state && !input[BACKUP_ONLY_SWITCH]->state){
+      //relay heat must be on, otherwise it is an invalid request
+      if(!input[RELAY_HEAT]->state){
         //do not turn on
         ESP_LOGD(state_name(),"Invalid configuration relay_backup_heat on before relay_heat.");
         id(controller_info).publish_state("ERROR: backup_heat on before heat.");
       } else {
         if(!id(relay_backup_heat).state){
           backup_heat_temp_limit_trigger = false;
+												  
           if(temp_limit_trigger) {
             if(!backup_heat_lowtemp) return;
             backup_heat_temp_limit_trigger = true;
             id(controller_info).publish_state("Backup heat on due to low temp");
-            if(backup_heat_only_enabled) state_transition(BACKUP_ONLY);
           } else if(input[SWW_RUN]->state) {
             if(!backup_heat_sww) return;
             id(controller_info).publish_state("Backup heat on due to SWW run");
@@ -490,8 +493,6 @@
           } else if(state() == STALL){
             if(!backup_heat_stall) return;
             id(controller_info).publish_state("Backup heat on due to STALL");
-          } else if(state() == BACKUP_ONLY||input[BACKUP_ONLY_SWITCH]->state){
-            id(controller_info).publish_state("Backup heat on due to BACKUP_HEAT_ONLY");
           } else {
             id(controller_info).publish_state("Backup heat on");
           }
@@ -504,6 +505,7 @@
           ESP_LOGD(state_name(),"Invalid configuration relay_backup_heat on before relay_pump.");
           id(controller_info).publish_state("Invalid config: backup_heat on before pump.");
         }
+											   
       }
     } else {
       if(id(relay_backup_heat).state){
@@ -540,6 +542,15 @@
     }
   }
   //***************************************************************
+  //*******************Defrost boost logic*************************
+  //***************************************************************
+  //Routine to increase the heat curve when the time between defrosts is too short to transfer enough heat into the house
+  void state_machine_class::defrost_boost(){
+    if(seconds_since_last_defrost() > 55*60) defrost_boost_offset = 0;
+    else if(seconds_since_last_defrost() < 50*60 && state() == DEFROST) defrost_boost_offset = id(defrost_boost_set).state;
+    else defrost_boost_offset = 0;
+  }
+  //***************************************************************
   //*******************Silent mode logic***************************
   //***************************************************************
   void state_machine_class::silent_mode(bool mode){
@@ -562,48 +573,128 @@
     //if input[OAT]->value <= silent always off: silent off
     //if in between: if boost or stall silent off otherwise silent on
     
-    if(input[OAT]->value >= id(oat_silent_always_on).state) {
-      if(!input[SILENT_MODE]->state){
-        ESP_LOGD(state_name(),"oat > oat_silent_always_on and silent mode off, switching silent mode on");
-        id(controller_info).publish_state("Switching Silent mode on oat > on");
-        silent_mode(true);
+    if(id(auto_silent).state && state() != PDS){
+      if(id(buiten_temp).state > id(auto_s_t_out_high).state) {
+        ESP_LOGD(state_name(), "Auto Silend outside temperature > high target --> Silent on");
+        silent =  true;
       }
-    } else if(silent_on_after_defrost){
-      if((get_run_time() - silent_after_defrost_start_time) > (20*60)){
-        //switch off after 20 minutes
-        silent_on_after_defrost = false;
-        if(input[SILENT_MODE]->state){
-          ESP_LOGD(state_name(),"silent_after_defrost elapsed Switching silent mode off");
-          id(controller_info).publish_state("Switching silent mode off 20 min after defrost"); 
-          silent_mode(false);
+      else if(id(buiten_temp).state < id(auto_s_t_out_low).state && id(evaporator_temp).state > id(auto_s_t_evap).state) {
+        ESP_LOGD(state_name(),"Äuto Silent, outside temperature < low target AND Evaporator T > target --> Silent on");
+        silent = true;
+      }
+      else if((id(buiten_temp).state >= id(auto_s_t_out_low).state && id(buiten_temp).state <= id(auto_s_t_out_high).state) && id(ha_dewpoint).state < (id(evaporator_temp).state + id(dew_margin).state) && id(ha_rh).state < id(auto_s_rh).state && id(t_evap).state > id(auto_s_t_evap).state) {
+        ESP_LOGD(state_name(),"Äuto Silent,low target < outside temperature < high target AND dewpoint < evaporation T + margin AND RH < RH limit  AND Evaporator T > target --> Silent on");
+        silent = true;
+      }  
+      else {
+        ESP_LOGD(state_name(),"Äuto Silent, silent mode conditions not met --> Silent off"); 
+        silent = false;
+      }
+      
+      if(silent_on_after_defrost){
+        if(state() != PDS){   
+          //switch off after Post Defrost Stabilizing finished
+          silent_on_after_defrost = false;
+          if(input[SILENT_MODE]->state){
+            ESP_LOGD(state_name(),"silent_after_defrost elapsed Switching silent mode off");
+            id(controller_info).publish_state("Switching silent mode off after post defrost stabilization"); 
+            silent = false;
+          }
         }
       }
-    
-    } else if(input[OAT]->value <= id(oat_silent_always_off).state){
-      if(input[SILENT_MODE]->state){
-        ESP_LOGD(state_name(),"Oat < oat_silent_always_off Switching silent mode off");
-        id(controller_info).publish_state("Switching silent mode off oat < oat_silent_always_off"); 
-        silent_mode(false);
-      }
-    } else {
-      if(input[BOOST]->state || state() == STALL) {
+      silent_mode(silent);
+    }
+     else {
+      if(input[OutsideT]->value >= id(oat_silent_always_on).state) {
+        if(!input[SILENT_MODE]->state){
+          ESP_LOGD(state_name(),"oat > oat_silent_always_on and silent mode off, switching silent mode on");
+          id(controller_info).publish_state("Switching Silent mode on oat > on");
+          silent_mode(true);
+        }
+      } else if(silent_on_after_defrost){
+        if(state() != PDS){
+          //switch off after Post Defrost Stabilizing finished
+          silent_on_after_defrost = false;
+          if(input[SILENT_MODE]->state){
+            ESP_LOGD(state_name(),"silent_after_defrost elapsed Switching silent mode off");
+            id(controller_info).publish_state("Switching silent mode off after post defrost stabilization"); 
+            silent_mode(false);
+          }
+        }
+      
+      } else if(input[OutsideT]->value <= id(oat_silent_always_off).state){
         if(input[SILENT_MODE]->state){
-          ESP_LOGD(state_name(),"OAT between silent mode brackets. Boost or stall silent mode off");
-          id(controller_info).publish_state("STALL/Boost switching silent mode off");
+          ESP_LOGD(state_name(),"Oat < oat_silent_always_off Switching silent mode off");
+          id(controller_info).publish_state("Switching silent mode off oat < oat_silent_always_off"); 
           silent_mode(false);
         }
-      } else if(!input[SILENT_MODE]->state){
-        ESP_LOGD(state_name(),"OAT between silent mode brackets. No boost/stall switching silent on");
-        id(controller_info).publish_state("Switching silent mode on oat in between");
-        silent_mode(true);
+      } else {
+        if(input[BOOST]->state || state() == STALL) {
+          if(input[SILENT_MODE]->state){
+            ESP_LOGD(state_name(),"OAT between silent mode brackets. Boost or stall silent mode off");
+            id(controller_info).publish_state("STALL/Boost switching silent mode off");
+            silent_mode(false);
+          }
+        } else if(!input[SILENT_MODE]->state){
+          ESP_LOGD(state_name(),"OAT between silent mode brackets. No boost/stall switching silent on");
+          id(controller_info).publish_state("Switching silent mode on oat in between");
+          silent_mode(true);
+        }
       }
     }
+  }
+  //***************************************************************
+  //*******************Break out logic*****************************
+  //***************************************************************
+  void state_machine_class::break_out(){
+    //Code to deal with sudden high power breakouts that occasionally happens during few degree freezing temperatures
+    //Issue is believed to be caused by the high press target pressure not being lowered when the EEV valve opens
+    //solution raises water temperature target for 4 minutes. Event is detected by raising compressure T > 73 C
+
+    if(input[COMPRESSOR]->state){
+    if (id(compressor_temp).state > 73 && !breakout){
+      if (state() == RUN || state() == OVERSHOOT || state() == STALL){
+        set_new_target(input[STOOKLIJN_TARGET]->value + 1);
+        ESP_LOGD(state_name(),"Breakout detected, raising target by 1 degree for 4 minutes");
+        id(controller_info).publish_state("Breakout detected, raising target by 1 degree for 4 minutes");
+        breakout_start_time = get_run_time();
+        breakout = true;
+      }
+    }
+    if (breakout && get_run_time() - breakout_start_time > 240){
+      set_new_target(input[STOOKLIJN_TARGET]->value);
+      ESP_LOGD(state_name(),"Breakout over, lowering target by 2 degrees");
+      id(controller_info).publish_state("Breakout over, lowering target by 2 degrees");
+      breakout = false;
+    }
+    }
+  }
+  //***************************************************************
+  //*******************Degree Minutes control**********************
+  //***************************************************************
+  void state_machine_class::degree_minutes_control(){
+    // Degree minutes control. If degree minrutes integral drops below the target, stooklijn will be incremented.
+    // Once degree minutes turns positive it means stooklijn target is met so the degree minutes offset is cleared and orignial
+    // stooklijn is followed. The stooklijn function already limits max value to prevent target is running out of control
+    if (id(degree_minutes_sw).state) {
+      if (degree_minutes_status) state_transition(STALL);
+      if (stooklijn_error_integral < id(degree_minutes).state){
+        degree_minutes_status = true;
+        stooklijn_error_integral = -5;
+        ESP_LOGD(state_name(),"Minutes degree triggered, Target should be adjusted");
+        id(wp_stooklijn_error_integral).publish_state(stooklijn_error_integral);
+      }
+      if (stooklijn_error_integral > 0) {
+        degree_minutes_status = false;
+        ESP_LOGD(state_name(),"Minutes degree back on target");
+      }  
+    } else degree_minutes_status = false;
   }
   void state_machine_class::set_silent_after_defrost(){
     silent_after_defrost_start_time = get_run_time();
     silent_on_after_defrost = true;
     silent_mode(true);
-    ESP_LOGD(state_name(), "Silent on After Defrost");
+    ESP_LOGE(state_name(), "Silent on After Defrost");
     id(controller_info).publish_state("Switching Silent on after defrost");
   }
   int state_machine_class::get_target_offset(){
@@ -611,42 +702,9 @@
     if(input[OAT]->value >= id(oat_silent_always_on).state) return -2;
     return -1;
   }
-  //Calculate a realistic start target, based on expexted delta T
-  //Example: if tracking_value = 25 and expected delta T is 8 degrees, a target of 26 is not realistic
-  //corrected for the fact that target setting using this function will always happen (shortly) after compressor start
-  int state_machine_class::get_realistic_start_target(){
-    
-    //this is wat we want
-    int new_target = input[STOOKLIJN_TARGET]->value + get_target_offset();
-    int expected_d_t = 7;
-    if(input[OAT]->value < 9 && input[OAT]->value >= id(oat_silent_always_on).state) expected_d_t = 6;
-    else if(input[OAT]->value < id(oat_silent_always_on).state && input[OAT]->value >= id(oat_silent_always_off).state) expected_d_t = 5;
-    else if(input[OAT]->value < id(oat_silent_always_off).state) expected_d_t = 5;
-    int lowest_realistic = round(input[TRACKING_VALUE]->value) + expected_d_t;
-    ESP_LOGD(state_name(), "Start_target: Wanted %d, expected delta t: %d, tracking_value: %f, lowest_realistic: %d",new_target,expected_d_t,round(input[TRACKING_VALUE]->value),lowest_realistic);
-    if(new_target < lowest_realistic) new_target = lowest_realistic;
-    return new_target;
-  }
-  void state_machine_class::set_safe_new_target(float new_target){
-    float prev_target = new_target;
-    //set a target that keeps a margin of at least 0.3 to the hysteresis
-    if(new_target != input[TEMP_NEW_TARGET]->value){
-      //don't allow a value below tracking_value-hysteresis+0.3
-      if(new_target < (input[TRACKING_VALUE]->value-hysteresis+0.3)) new_target = ceil(input[TRACKING_VALUE]->value-hysteresis+0.3);
-      //also not below minimum watertemp -2
-      if(new_target < (id(stooklijn_min_wtemp).state - 2)) new_target = (id(stooklijn_min_wtemp).state - 2);
-      //and not above max overshoot
-      if(new_target > input[STOOKLIJN_TARGET]->value + max_overshoot) new_target = input[STOOKLIJN_TARGET]->value + max_overshoot;
-      input[TEMP_NEW_TARGET]->receive_value(new_target);
-    }
-    if(prev_target != new_target){
-      ESP_LOGD(state_name(), "set_safe_target adjusted target from: %f to %f",prev_target,new_target);
-    }
-  }
-  void state_machine_class::set_unsafe_new_target(float new_target){
-    if(new_target != input[TEMP_NEW_TARGET]->value){
-      input[TEMP_NEW_TARGET]->receive_value(new_target);
-    }
+  void state_machine_class::set_new_target(float new_target){
+    //TODO check for multiple target changes during run
+    if(new_target != input[TEMP_NEW_TARGET]->value) input[TEMP_NEW_TARGET]->receive_value(new_target);
   }
   void state_machine_class::start_events(){
     events.clear();
@@ -727,26 +785,13 @@
             id(controller_info).publish_state("Backup heat off due to temperature improvement");
           }
         }
-      } else if(*it == BACKUP_ONLY_SWITCH){
-        if (input[BACKUP_ONLY_SWITCH]->state && state() != BACKUP_ONLY && backup_heat_only_enabled){
-          state_transition(BACKUP_ONLY);
-          id(controller_info).publish_state("Backup heat Only");
-        } else if(state() == BACKUP_ONLY && !input[BACKUP_ONLY_SWITCH]->state){
-          if(input[THERMOSTAT]->state) state_transition(START);
-          else state_transition(AFTERRUN);
-        } else if(backup_heat_temp_limit_trigger && input[OAT]->value > id(backup_heater_always_on_temp).state){
-          //if triggered due to low temp and situation improved (with some hysteresis)
-          input[BACKUP_ONLY_SWITCH]->receive_state(false);
-          if(input[THERMOSTAT]->state) state_transition(START);
-          else state_transition(AFTERRUN);
-        }
       }
     }
     events.clear();
     return state_change;
   }
   bool state_machine_class::compressor_modulation(){
-    if(input[SILENT_MODE]->state && id(compressor_rpm).state <= 45) return true;
+    if(input[SILENT_MODE]->state && id(compressor_rpm).state <= 50) return true;
     else if(!input[SILENT_MODE]->state && id(compressor_rpm).state <= 70) return true;
     else return false;
   }
@@ -756,13 +801,10 @@
   //update target temp through modbus
   void state_machine_class::set_target_temp(float target){
     auto water_temp_call = id(water_temp_target_output).make_call();
-    target = round(target);
-    water_temp_call.set_value(target);
+    water_temp_call.set_value(round(target));
     water_temp_call.perform();
-    ESP_LOGD("set_target_temp", "Modbus target set to: %f", target);
+    ESP_LOGD("set_target_temp", "Modbus target set to: %f", round(target));
     id(doel_temp).publish_state(target*10);
-    //reset target integral
-    target_error_integral = 0;
   }
   //proces automatic_boost and backup_heat_mode selects
   void state_machine_class::proces_selects(){
@@ -838,24 +880,8 @@
         backup_heat_lowtemp = true;
       break;
     }
-    index = id(backup_heat_only_mode).active_index();
-    switch(index.value()){
-      case 0:
-        backup_heat_only_enabled = false;
-        input[BACKUP_ONLY_SWITCH]->receive_state(false);
-      break;
-      case 1:
-        backup_heat_only_enabled = true;
-        if(state() == BACKUP_ONLY && !backup_heat_temp_limit_trigger) input[BACKUP_ONLY_SWITCH]->receive_state(false);
-      break;
-      case 2:
-        backup_heat_only_enabled = true;
-        input[BACKUP_ONLY_SWITCH]->receive_state(true);
-      break;
-    }
     ESP_LOGD("proces_selects", "backup_heat stall: %d sww: %d defrost: %d lowtemp: %d",backup_heat_stall, backup_heat_sww, backup_heat_defrost, backup_heat_lowtemp);
     ESP_LOGD("proces_selects", "automatic_boost defrost: %d sww: %d",boost_defrost,boost_sww);
-    ESP_LOGD("proces_selects", "backup_heat_only enabled: %d enable_now: %d",backup_heat_only_enabled,input[BACKUP_ONLY_SWITCH]->state);
   }
   
   //main state machine object

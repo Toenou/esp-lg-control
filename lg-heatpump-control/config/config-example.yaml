@@ -6,10 +6,10 @@ esp8266:
 # Set encryption key
 api:
   encryption:
-    key: !secret api_key
+    key: ""
 # Set an ota password
 ota:
-  password: !secret ota_password
+  password: ""
 
 wifi:
   ssid: !secret wifi_ssid
@@ -27,6 +27,6 @@ wifi:
 # Set hotspot password
   ap:
     ssid: "Esp-LG Fallback Hotspot"
-    password: !secret hotspot_password
+    password: ""
 
 captive_portal:
