@@ -327,6 +327,39 @@ number:
     unit_of_measurement: "°C"
     optimistic: true
     icon: mdi:thermometer-plus 
+  - platform: template
+    id: breakout_compr
+    name: "breakout compressor Hz"
+    min_value: 70
+    max_value: 120
+    step: 5
+    restore_value: yes
+    initial_value: 90
+    unit_of_measurement: "Hz"
+    optimistic: true
+    icon: mdi:engine 
+  - platform: template
+    id: breakout_time
+    name: "breakout time"
+    min_value: 2
+    max_value: 40
+    step: 2
+    restore_value: yes
+    initial_value: 20
+    unit_of_measurement: "min"
+    optimistic: true
+    icon: mdi:timer-outline
+  - platform: template
+    id: defrost_boost_time
+    name: "defrost boost time"
+    min_value: 40
+    max_value: 120
+    step: 5
+    restore_value: yes
+    initial_value: 50
+    unit_of_measurement: "min"
+    optimistic: true
+    icon: mdi:timer-outline
 select:
   - platform: template
     name: "Automatic Boost"
@@ -513,6 +546,13 @@ sensor:
     unit_of_measurement: "degree minutes" 
     update_interval: never  
     icon: mdi:sigma
+  - platform: template
+    name: "HP time since last defrost"
+    id: time_lap_since_last_defrost
+    accuracy_decimals: 0
+    unit_of_measurement: "s"
+    update_interval: never
+    icon: mdi:timer
   - platform: homeassistant
     id: ha_windchill_temp
     entity_id: sensor.feel_temperature

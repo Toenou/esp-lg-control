@@ -25,6 +25,8 @@
         uint_fast32_t state_start_time = 0; //run_time_value on last state change
         uint_fast32_t run_start_time = 0; //run_time_value of start of heat run
         uint_fast32_t breakout_start_time = 0; //run_time_value of start of breakout
+        uint_fast32_t last_defrost_end_time = 0; //run_time_value of last defrost end
+        //uint_fast32_t seconds_since_last_defrost = 0; //seconds since last defrost
         int current_boost_offset = 0 ;//keep track of offset during boost mode. Will be 0 if boost is not active
         std::vector<float> derivative; //vector of floats to integrate derivative (used in control logic)
         float stooklijn_error_integral = 0; //to provide 'degree minutes' sensor data																					 
@@ -78,8 +80,7 @@
         uint_fast32_t get_run_start_time();
         uint_fast32_t get_state_start_time();
         uint_fast32_t seconds_since_state_start();
-        uint_fast32_t last_defrost_end_time();
-        uint_fast32_t seconds_since_last_defrost();
+        void set_last_defrost_end_time();
         void receive_inputs();
         void process_inputs();
         void unflag_input_values();
@@ -222,11 +223,8 @@
   uint_fast32_t state_machine_class::seconds_since_state_start(){
     return get_run_time() - get_state_start_time();
   }
-  uint_fast32_t state_machine_class::last_defrost_end_time(){
-    return get_run_time();
-  }
-  uint_fast32_t state_machine_class::seconds_since_last_defrost(){
-    return get_run_time() - last_defrost_end_time();
+  void state_machine_class::set_last_defrost_end_time(){
+    last_defrost_end_time = get_run_time();
   }
   //receive all values, booleans (states) or floats (values)
   void state_machine_class::receive_inputs(){
@@ -546,9 +544,12 @@
   //***************************************************************
   //Routine to increase the heat curve when the time between defrosts is too short to transfer enough heat into the house
   void state_machine_class::defrost_boost(){
-    if(seconds_since_last_defrost() > 55*60) defrost_boost_offset = 0;
-    else if(seconds_since_last_defrost() < 50*60 && state() == DEFROST) defrost_boost_offset = id(defrost_boost_set).state;
-    else defrost_boost_offset = 0;
+    uint_fast32_t seconds_since_last_defrost = 0;
+    if (state() == IDLE) seconds_since_last_defrost = id(defrost_boost_time).state * 60;
+    else seconds_since_last_defrost = get_run_time() - last_defrost_end_time;
+    if(seconds_since_last_defrost > (id(defrost_boost_time).state + 5) * 60) defrost_boost_offset = 0;
+    else if(seconds_since_last_defrost < id(defrost_boost_time).state * 60) defrost_boost_offset = id(defrost_boost_set).state;
+    id(time_lap_since_last_defrost).publish_state(seconds_since_last_defrost);
   }
   //***************************************************************
   //*******************Silent mode logic***************************
@@ -572,7 +573,10 @@
     //if input[OAT]->value >= silent always on: silent on
     //if input[OAT]->value <= silent always off: silent off
     //if in between: if boost or stall silent off otherwise silent on
-    
+    if (breakout) {
+      silent_mode(true);
+      return;
+    }
     if(id(auto_silent).state && state() != PDS){
       if(id(buiten_temp).state > id(auto_s_t_out_high).state) {
         ESP_LOGD(state_name(), "Auto Silend outside temperature > high target --> Silent on");
@@ -649,22 +653,18 @@
   void state_machine_class::break_out(){
     //Code to deal with sudden high power breakouts that occasionally happens during few degree freezing temperatures
     //Issue is believed to be caused by the high press target pressure not being lowered when the EEV valve opens
-    //solution raises water temperature target for 4 minutes. Event is detected by raising compressure T > 73 C
+    //solution switching to silent mode for 20 (default) minutes. Event is detected by raising compressure Hz > 90 Hz (default)
 
     if(input[COMPRESSOR]->state){
-    if (id(compressor_temp).state > 73 && !breakout){
-      if (state() == RUN || state() == OVERSHOOT || state() == STALL){
-        set_new_target(input[STOOKLIJN_TARGET]->value + 1);
-        ESP_LOGD(state_name(),"Breakout detected, raising target by 1 degree for 4 minutes");
-        id(controller_info).publish_state("Breakout detected, raising target by 1 degree for 4 minutes");
+    if (id(compressor_rpm).state > id(breakout_compr).state && !breakout){
+        ESP_LOGD(state_name(),"Breakout detected, switcing to silent mode");
+        id(controller_info).publish_state("Breakout detected, switching to silent mode");
         breakout_start_time = get_run_time();
         breakout = true;
-      }
     }
-    if (breakout && get_run_time() - breakout_start_time > 240){
-      set_new_target(input[STOOKLIJN_TARGET]->value);
-      ESP_LOGD(state_name(),"Breakout over, lowering target by 2 degrees");
-      id(controller_info).publish_state("Breakout over, lowering target by 2 degrees");
+    if (breakout && get_run_time() - breakout_start_time > (id(breakout_time).state *60)){
+      ESP_LOGD(state_name(),"Breakout over, stop overruling silent mode");
+      id(controller_info).publish_state("Breakout over, stop overruling silent mode");
       breakout = false;
     }
     }
@@ -676,19 +676,21 @@
     // Degree minutes control. If degree minrutes integral drops below the target, stooklijn will be incremented.
     // Once degree minutes turns positive it means stooklijn target is met so the degree minutes offset is cleared and orignial
     // stooklijn is followed. The stooklijn function already limits max value to prevent target is running out of control
-    if (id(degree_minutes_sw).state) {
-      if (degree_minutes_status) state_transition(STALL);
+    if (id(degree_minutes_sw).state && (state() == RUN || state() == STALL)){
       if (stooklijn_error_integral < id(degree_minutes).state){
         degree_minutes_status = true;
+        state_transition(STALL);
         stooklijn_error_integral = -5;
         ESP_LOGD(state_name(),"Minutes degree triggered, Target should be adjusted");
+        id(controller_info).publish_state("Minutes degree triggered, Target should be adjusted");
         id(wp_stooklijn_error_integral).publish_state(stooklijn_error_integral);
       }
-      if (stooklijn_error_integral > 0) {
+      if (stooklijn_error_integral >= 0) {
         degree_minutes_status = false;
         ESP_LOGD(state_name(),"Minutes degree back on target");
+        id(controller_info).publish_state("Minutes degree back on target");
       }  
-    } else degree_minutes_status = false;
+    }
   }
   void state_machine_class::set_silent_after_defrost(){
     silent_after_defrost_start_time = get_run_time();

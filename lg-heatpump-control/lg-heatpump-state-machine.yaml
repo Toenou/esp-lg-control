@@ -518,9 +518,9 @@ lambda: !lambda |-
         fsm.add_event(THERMOSTAT);
         fsm.add_event(RELAY_HEAT);
         fsm.add_event(BACKUP_HEAT);
-        fsm.defrost_boost();
         if(fsm.check_change_events()) break;
         
+        fsm.defrost_boost();
         /*if(!fsm.input[DEFROST_RUN]->state){
           //defrosting stopped. Prepare for the post defrost run
           if(id(silent_after_defrost).state) fsm.set_silent_after_defrost();
@@ -541,7 +541,7 @@ lambda: !lambda |-
         if(!fsm.input[DEFROST_RUN]->state){
           //defrosting stopped. Prepare for the post defrost run
             fsm.state_transition(PDS);
-            fsm.last_defrost_end_time();
+            fsm.set_last_defrost_end_time();
         }
         break;
       }
@@ -586,6 +586,7 @@ lambda: !lambda |-
            if(fsm.delta > 0){
              fsm.backup_heat(false);
              fsm.state_transition(RUN);
+             fsm.degree_minutes_status = false;
            } else {
                fsm.state_transition(STALL);
              }

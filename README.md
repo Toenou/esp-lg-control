@@ -26,11 +26,17 @@ Example without external thermostat and without external relays:
 ```
 
 ## esp-lg-control -> Hobby project!
-ESP8266 based controller for LG Therma V Monoblock Unit.
+ESP32 based controller for LG Therma V Monoblock Unit.
 Connects the LG to HomeAssistant and tries to optimise output modulation.
 Tested with 3-phase 14kW U34 version. So propably works at least with 12-14-16kW U34 3-phase models. May also work with 1-phase and U44 models (depending on modbus registers). But not tested.
 
 This is a hobby project. I share this to allow other people to pick up ideas and contribute. All assistance is welcome. I will not provide support, so use at your own risk. And make sure you know what you are doing, by using this script it is possible that your unit stops functioning or breaks and you could electrocute yourself.
+
+## UPDATES
+March 2025
+*  Redesigned breakout logic. It now acts on compressor frequency. When > 85 % (adjustable) silent mode is switched on for xx (adjustable) minutes.
+*  Added a defrost-boost routine. Routine increases the heating curve with x °C (adjustable) to compensate for loss of energy transfer when time between defrosts < 50 mins (adjustable). The boost is disabled when time between defrosts > 5 min above boost threshold. Changes in boost value take effect on the next defrost.
+* Several small enhancements and bug fixes
 
 ## What is different
 This version is not up to date withn the original version (yet).

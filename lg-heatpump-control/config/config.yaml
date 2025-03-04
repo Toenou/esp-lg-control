@@ -1,0 +1,33 @@
+esp32:
+  board: wemos_d1_mini32
+  framework:
+    type: esp-idf
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "gkHIIHxXh5y0IwuaTPOotCoAp5Bk2p3gXuha8GCaKWc="
+  reboot_timeout: 0s
+
+ota:
+  platform: esphome                 
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
+
+  manual_ip:
+    static_ip: 192.168.1.130
+    gateway: 192.168.0.1
+    subnet: 255.255.254.0
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Lg-Heatpump-Modbus-esp32"
+    password: !secret ap_password
+
+status_led:
+  pin:
+    number: GPIO23
